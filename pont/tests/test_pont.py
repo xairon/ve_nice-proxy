@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -221,7 +222,8 @@ def test_nouveau_cookie_ecrit_atomiquement_en_memoire_et_dans_le_fichier(tmp_pat
     texte = f.read_text()
     assert "VENICE_CLERK_CLIENT=nouveau" in texte and "VENICE_PONT_CLE=k" in texte and "# note" in texte
     assert "ancien" not in texte
-    assert oct(f.stat().st_mode & 0o777) == "0o600"
+    if os.name == "posix":   # Windows n'a pas de permissions 600
+        assert oct(f.stat().st_mode & 0o777) == "0o600"
     assert src.etat()["dernier_renouvellement"] is not None
     assert not list(tmp_path.glob("*.tmp"))
 

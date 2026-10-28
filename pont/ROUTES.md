@@ -45,11 +45,19 @@ Corps et détails : [docs/MULTIMODAL.md](../docs/MULTIMODAL.md).
 | `GET /api/inference/rate-limits` | — | `{chat, conversation, image, inpaint, scrape: {remaining, resetAt}}` | testé |
 | `POST /api/inference/video/quote` | `modelId, prompt, duration, resolution…` | `{quote}` : 55 (wan-2-7, 5 s) | testé, gratuit |
 | `POST /api/inference/video/queue`, `GET /video/retrieve`, `/music/queue` | voir schémas du site | file d'attente | **non essayé** (141 + 20 modèles tous payants) |
-| `POST /api/inference/inpaint`, `/background-remove`, `/multi-edit` | multipart | image | repéré, non essayé |
+| `POST /api/inference/inpaint` | multipart `file` + `modelId` (`qwen-edit-uncensored`, `firered-image-edit`), `prompt` ; image d'au moins ~512 px sinon 400 `IMAGE_TOO_SMALL` | PNG ; en-têtes `x-ratelimit-type: inpaint`, `x-ratelimit-remaining` | testé, 0 crédit |
+| `POST /api/inference/enhance` | multipart `file` + `scale` (2, 4 mesurés), `enhance: false` | PNG agrandi | testé, 0 crédit |
+| `POST /api/inference/background-remove` | JSON `{image_url: data URL}` | PNG RGBA | testé, 0 crédit |
+| `POST /api/app/memoria/embeddings` | JSON `{encoding_format: "float", input: [..], skipImportance: true}` (sans `skipImportance` : 500) | format OpenAI, modèle `text-embedding-bge-m3`, 1 024 dimensions | testé, 0 crédit |
+| `POST /api/inference/text_parser` (types) | PDF, EPUB, DOCX, PPTX, XLSX, XLS, texte, Markdown, CSV, JSON, code ; une image : 400 « Unsupported file type » | | testé (txt, PDF) |
+| `GET /api/characters/me` | — | `[]` (aucun personnage) | testé, lecture seule |
+| `POST /api/inference/multi-edit`, `/audio/voices`, `/audio/voice-changer/*`, `/music/queue` | voir schémas du site | | **non essayé** (payants ou risque de débit) |
+| `GET /api/app/user/billing/usage-history` | — | 100 dernières lignes `{amount, createdAt, currency, modelId, requestId, taskId}` | testé, lecture seule |
+| `GET /api/user/session?bustBalanceCache=true` | — | `{token}` JWT dont la charge contient `veniceCredits` | testé (même valeur que sans le paramètre) |
 | `GET /api/app/models` | — | catalogue par catégorie (`image`, `inpaint`, `text`, `tts`, `music`, `video`, `embedding`), drapeau `usesCredits` par modèle | testé |
 
 ## Non cartographié ou non testé (volontairement)
-Personnages, mémoire, historique de conversations, vision sur la route agents (média passant par un manifeste propre aux « minds »), génération vidéo et musique, édition d'image.
+Mémoire, historique de conversations (chiffré de bout en bout), vision sur la route agents (média passant par un manifeste propre aux « minds »), génération vidéo et musique, édition d'image.
 
 ## Risques
 Usage en zone grise des CGU : cookie de session utilisé par un programme. Garde-fous : plafond 20 req/min côté OmniRoute, pas de boucle, arrêt au premier 429.

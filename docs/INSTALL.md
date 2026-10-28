@@ -118,7 +118,7 @@ python3 venice-setup login
 python3 venice-setup run        # au premier plan ; Ctrl+C arrête. Le pont écoute sur 127.0.0.1:8700
 ```
 
-Dans un autre terminal : `python3 venice-setup status`. Sous Windows, utilisez `python` ; les permissions 600 ne s'y appliquent pas (le dossier de votre profil utilisateur fait la protection) : n'y mettez que votre compte personnel. Windows n'a pas été essayé par l'auteur.
+Dans un autre terminal : `python3 venice-setup status`. Sous Windows, utilisez `python` ; les permissions 600 ne s'y appliquent pas (le dossier de votre profil utilisateur fait la protection) : n'y mettez que votre compte personnel. Les tests du pont passent sur Windows (CI) ; l'installation complète n'y a pas été essayée par l'auteur.
 
 ## Docker
 

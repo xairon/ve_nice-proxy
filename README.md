@@ -87,7 +87,7 @@ python3 venice-setup harness opencode --appliquer   # ajoute le fournisseur dans
 
 **Sans OmniRoute** : le pont suffit à OpenCode, aider, Continue, Cline, curl et tout client OpenAI-compatible. OmniRoute n'est utile que pour Codex CLI et Claude Code (API Responses et Messages) ou pour des alias et des clés par client.
 
-Windows : le pont est en Python standard et la CI l'essaie, mais l'auteur n'a pas de machine Windows ; `python venice-setup run` au premier plan est le chemin à tenter, un retour est le bienvenu.
+Windows : les tests du pont passent sur le runner Windows de la CI (28/10/2026), mais l'auteur n'a pas de machine Windows : `python venice-setup run` au premier plan est le chemin à tenter, un retour est le bienvenu.
 
 ## Documentation
 

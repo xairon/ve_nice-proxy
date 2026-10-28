@@ -102,7 +102,7 @@ def test_trop_d_images_sont_refusees(monkeypatch):
         vp.construire_corps_venice("m", [_msg(_image(), _image(), _image())], None, {}, MediasFaux())
 
 
-def test_audio_direct_n_est_pas_pris_en_charge():
+def test_audio_invalide_est_refuse():
     with pytest.raises(vp.EntreeInvalide, match="audio"):
         vp.construire_corps_venice("m", [_msg({"type": "input_audio", "input_audio": {"data": "x", "format": "wav"}})],
                                    None, {}, MediasFaux())
@@ -339,7 +339,7 @@ def test_generation_exige_la_cle(serveur):
 
 def test_liste_des_modeles_d_image(serveur):
     requete, *_ = serveur
-    ids = {m["id"] for m in _json(requete("/v1/images/models")[1])["data"]}
+    ids = {m["id"] for m in _json(requete("/v1/images/models")[1])["data"] if m["owned_by"] == "venice-image"}
     assert ids == set(vp.IMAGES_GRATUITES) and "z-image-turbo" in ids and "flux-2-pro" not in ids
 
 

@@ -1,10 +1,11 @@
-# Pont Venice en conteneur : bibliothèque standard seule, utilisateur non root, aucune clé dans l'image.
+# Pont Venice en conteneur : bibliothèque standard seule (+ poppler-utils pour l'OCR des PDF scannés), utilisateur non root, aucune clé dans l'image.
 FROM python:3.12-slim
 ENV PYTHONUNBUFFERED=1 \
     VENICE_PONT_ENV=/data/venice.env \
     VENICE_PONT_CREDITS=/data/credits.json \
     VENICE_PONT_ECOUTE=0.0.0.0:8700
-RUN useradd --system --uid 10001 --no-create-home pont && mkdir /data && chown pont /data
+RUN apt-get update && apt-get install -y --no-install-recommends poppler-utils && rm -rf /var/lib/apt/lists/* \
+ && useradd --system --uid 10001 --no-create-home pont && mkdir /data && chown pont /data
 COPY pont/venice_pont.py /app/venice_pont.py
 USER pont
 VOLUME /data

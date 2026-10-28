@@ -13,6 +13,7 @@ services:
     volumes:
       - "${VENICE_DATA:-${HOME}/.config/venice-setup/defaut}:/data"
     read_only: true
+    tmpfs: ["/tmp:size=64m,mode=1777"]           # pdftoppm (OCR des PDF scannés) y écrit ses pages
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     mem_limit: 256m

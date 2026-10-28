@@ -19,9 +19,12 @@ Venice facture une partie de ses modèles en **crédits** ; d'autres sont **illi
 
 | Capacité | Modèles | Détail |
 |---|---|---|
-| Vision (entrée image) | `qwen-3-8-27b`, `qwen3-6-27b`, `qwen3-5-35b-a3b`, `google-gemma-4-26b-a4b-it`, `google-gemma-4-31b-it`, `gemma4-uncensored`, `venice-uncensored-1-2`, `qwen3-vl-235b-a22b` | un dessin (cercle rouge, carré bleu) décrit correctement par chacun ; `venice-uncensored-role-play` répond HTTP 500 avec une image |
+| Vision, OCR (entrée image) | `qwen-3-8-27b`, `qwen3-6-27b`, `qwen3-5-35b-a3b`, `google-gemma-4-26b-a4b-it`, `google-gemma-4-31b-it`, `gemma4-uncensored`, `venice-uncensored-1-2`, `qwen3-vl-235b-a22b` | un dessin (cercle rouge, carré bleu) décrit correctement par chacun ; `venice-uncensored-role-play` répond HTTP 500 avec une image |
 | Génération d'image | `z-image-turbo` (défaut), `chroma`, `stable-diffusion-3.5-rev2`, `lustify-sdxl`, `lustify-v8`, `wai-illu` | seul `z-image-turbo` a été exécuté ; les autres sont `usesCredits: false` dans le catalogue web. 36 autres modèles d'image sont payants (refusés) |
 | Synthèse vocale | `tts-kokoro` (défaut), `tts-qwen3-0-6b`, `tts-qwen3-1-7b`, `tts-xai-v1`, `tts-gemini-3-1-flash`, `tts-elevenlabs-turbo-v2-5`, `tts-minimax-speech-02-hd` (mp3) ; `tts-inworld-1-5-max`, `tts-gradium-v1` (wav seulement) | texte de 15 caractères par modèle. `tts-orpheus` et `tts-chatterbox-hd` n'ont pas répondu en 120 s : exclus |
+| Édition d'image | `qwen-edit-uncensored` (défaut), `firered-image-edit` | image d'au moins ~512 px ; sortie 1 024 px mesurée ; quota « inpaint » 1 000/jour |
+| Agrandissement, détourage | (pas de choix de modèle) | ×2 et ×4 mesurés ; PNG avec transparence |
+| Embeddings | `text-embedding-bge-m3` | 1 024 dimensions, un seul modèle sur cette route |
 | Transcription | `nvidia/parakeet-tdt-0.6b-v3` | multilingue, français correct ; tout nom de modèle envoyé (`whisper-1`…) est remplacé par celui-ci |
 
 Le catalogue web (`/api/app/models`) porte un drapeau `usesCredits` par modèle : c'est la source de la liste ci-dessus (`false` = sans pièce). Les modèles **vidéo** (141) et **musique** (20) sont tous payants.

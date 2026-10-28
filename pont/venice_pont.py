@@ -5,6 +5,7 @@ outerface.venice.ai l'accepte. Les outils sont émulés : définitions dans le p
 réponse JSON {"tool_calls": [...]} retransformée en tool_calls OpenAI.
 """
 import base64
+import glob
 import hmac
 import ipaddress
 import json
@@ -12,14 +13,19 @@ import math
 import os
 import re
 import secrets
+import shutil
 import socket
+import struct
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import zlib
 from email import policy
 from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -440,22 +446,6 @@ def analyser_fichier_venice(jeton, nom, octets):
         return r.json().get("text", "")
 
 
-class Medias:
-    """Résolveurs des pièces jointes d'un message : image (data URL ou https) et fichier."""
-
-    def __init__(self, jeton):
-        self._jeton = jeton
-
-    def image(self, url):
-        if isinstance(url, str) and url.startswith("https://"):
-            mime, octets = telecharger_image(url)
-            return image_en_base64(f"data:{mime};base64,{base64.b64encode(octets).decode()}")
-        return image_en_base64(url)
-
-    def fichier(self, nom, octets):
-        return analyser_fichier_venice(self._jeton, nom, octets)
-
-
 class MediasHorsLigne:
     """Résolveur par défaut de construire_corps_venice : aucune pièce jointe sans résolveur explicite."""
 
@@ -464,6 +454,196 @@ class MediasHorsLigne:
 
     def fichier(self, nom, octets):
         raise EntreeInvalide("fichier : pièces jointes non résolues dans ce contexte")
+
+    def audio(self, octets, format_audio):
+        raise EntreeInvalide("audio : pièces jointes non résolues dans ce contexte")
+
+
+# --- PDF scannés : pages en images (OCR) --------------------------------------------------------------------
+
+OCR_MODELE = os.environ.get("VENICE_PONT_OCR_MODELE", "qwen-3-8-27b")
+OCR_PAGES_MAX = int(os.environ.get("VENICE_PONT_OCR_PAGES", "20"))
+OCR_PROMPT = ("Transcris fidèlement tout le texte visible dans cette image, dans l'ordre de lecture, sans commentaire ni mise en forme "
+              "ajoutée. Réponds uniquement par le texte ; si aucun texte n'est visible, réponds par une chaîne vide.")
+_OBJET_FLUX = re.compile(rb"obj\s*<<(.*?)>>\s*stream\r?\n", re.S)
+_FILTRES_PDF = re.compile(rb"/(FlateDecode|DCTDecode|CCITTFaxDecode|JBIG2Decode|JPXDecode|LZWDecode|ASCII85Decode|ASCIIHexDecode|RunLengthDecode)")
+IMAGE_PDF_MIN = 100  # en dessous, logo ou filet : pas une page
+
+
+def _entier_pdf(dico, cle):
+    m = re.search(cle + rb"\s+(\d+)(?!\s+\d+\s+R)", dico)
+    return int(m.group(1)) if m else None
+
+
+def _png(largeur, hauteur, couleurs, idat):
+    def bloc(nom, donnees):
+        return struct.pack(">I", len(donnees)) + nom + donnees + struct.pack(">I", zlib.crc32(nom + donnees) & 0xFFFFFFFF)
+    ihdr = struct.pack(">IIBBBBB", largeur, hauteur, 8, 2 if couleurs == 3 else 0, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + bloc(b"IHDR", ihdr) + bloc(b"IDAT", idat) + bloc(b"IEND", b"")
+
+
+def _image_pdf(dico, flux, largeur, hauteur):
+    """(type MIME, octets) d'une image intégrée à un PDF, ou le nom du filtre non pris en charge."""
+    filtre = re.search(rb"/Filter\s*(\[[^\]]*\]|/\w+)", dico)
+    filtres = [f.decode() for f in _FILTRES_PDF.findall(filtre.group(1))] if filtre else []
+    if filtres == ["DCTDecode"]:
+        return "image/jpeg", flux
+    if filtres == ["FlateDecode", "DCTDecode"]:
+        return "image/jpeg", zlib.decompress(flux)
+    if filtres != ["FlateDecode"]:
+        return "/".join(filtres) or "sans filtre"
+    espace = re.search(rb"/ColorSpace\s*/(\w+)", dico)
+    couleurs = {b"DeviceRGB": 3, b"DeviceGray": 1}.get(espace.group(1) if espace else b"")
+    if not couleurs or _entier_pdf(dico, b"/BitsPerComponent") != 8:
+        return "FlateDecode (espace colorimétrique ou profondeur non pris en charge)"
+    predicteur = _entier_pdf(dico, b"/Predictor") or 1
+    if predicteur >= 10:  # lignes déjà filtrées comme en PNG : le flux sert tel quel d'IDAT
+        if _entier_pdf(dico, b"/Columns") != largeur or (_entier_pdf(dico, b"/Colors") or 1) != couleurs:
+            return "FlateDecode (prédicteur inattendu)"
+        return "image/png", _png(largeur, hauteur, couleurs, flux)
+    if predicteur != 1:
+        return "FlateDecode (prédicteur TIFF)"
+    brut = zlib.decompress(flux)
+    ligne = largeur * couleurs
+    if len(brut) != ligne * hauteur:
+        return "FlateDecode (taille inattendue)"
+    return "image/png", _png(largeur, hauteur, couleurs, zlib.compress(b"".join(b"\x00" + brut[i:i + ligne] for i in range(0, len(brut), ligne))))
+
+
+def images_integrees_pdf(pdf):
+    """Images de page d'un PDF scanné, dans l'ordre du fichier, sans aucune bibliothèque : JPEG repris tel quel, Flate RGB ou gris en PNG.
+
+    CCITT, JBIG2, JPEG 2000 et les palettes ne sont pas décodés : l'erreur nomme alors le filtre."""
+    pages, refus = [], []
+    for m in _OBJET_FLUX.finditer(pdf):
+        dico = m.group(1)
+        if not re.search(rb"/Subtype\s*/Image", dico):
+            continue
+        largeur, hauteur = _entier_pdf(dico, b"/Width"), _entier_pdf(dico, b"/Height")
+        if not largeur or not hauteur or min(largeur, hauteur) < IMAGE_PDF_MIN:
+            continue
+        debut, longueur = m.end(), _entier_pdf(dico, b"/Length")
+        if longueur is not None and pdf[debut + longueur:debut + longueur + 12].lstrip().startswith(b"endstream"):
+            flux = pdf[debut:debut + longueur]
+        else:
+            flux = pdf[debut:pdf.find(b"endstream", debut)].rstrip(b"\r\n")
+        try:
+            res = _image_pdf(dico, flux, largeur, hauteur)
+        except zlib.error:
+            res = "flux corrompu"
+        (refus.append(res) if isinstance(res, str) else pages.append(res))
+    if refus and not pages:
+        raise EntreeInvalide(f"PDF scanné : filtre d'image non pris en charge ({', '.join(sorted(set(refus)))}) ; installer poppler-utils (pdftoppm)")
+    return pages
+
+
+def pages_pdf(pdf):
+    """Pages d'un PDF en images : `pdftoppm` (poppler) à 150 dpi s'il est installé, sinon les images intégrées au PDF."""
+    outil = shutil.which("pdftoppm")
+    if outil:
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                source, sortie = os.path.join(tmp, "in.pdf"), os.path.join(tmp, "p")
+                with open(source, "wb") as f:
+                    f.write(pdf)
+                r = subprocess.run([outil, "-r", "150", "-png", "-f", "1", "-l", str(OCR_PAGES_MAX + 1), source, sortie],
+                                   capture_output=True, timeout=180)
+                fichiers = sorted(glob.glob(sortie + "-*.png"), key=lambda c: int(re.search(r"-(\d+)\.png$", c).group(1)))
+                if r.returncode == 0 and fichiers:
+                    return [("image/png", open(c, "rb").read()) for c in fichiers]
+        except (OSError, subprocess.SubprocessError) as e:  # pas de dossier temporaire (conteneur en lecture seule), délai dépassé...
+            print(f"pdftoppm inutilisable ({e}) : repli sur les images intégrées au PDF", file=sys.stderr, flush=True)
+    pages = images_integrees_pdf(pdf)
+    if not pages:
+        raise EntreeInvalide("PDF scanné : aucun rendu possible (installer poppler-utils pour `pdftoppm`, ou joindre les pages en images)")
+    return pages
+
+
+FORMATS_AUDIO = {"mp3": "audio/mpeg", "wav": "audio/wav", "m4a": "audio/mp4", "ogg": "audio/ogg", "flac": "audio/flac", "webm": "audio/webm"}
+
+
+def _type_image(octets):
+    if octets.startswith(b"\x89PNG"):
+        return "image/png"
+    if octets.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if octets[:4] == b"RIFF" and octets[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+class PlafondAtteint(EntreeInvalide):
+    statut = 429
+
+
+class Medias:
+    """Résolveurs des pièces jointes d'un message : image (data URL ou https), fichier (texte, PDF, OCR), audio (transcription)."""
+
+    def __init__(self, jeton, limiteur=None, limiteur_voix=None):
+        self._jeton, self._limiteur, self._limiteur_voix = jeton, limiteur, limiteur_voix
+        self._transcriptions, self._verrou = {}, threading.Lock()
+
+    def _reserver(self, limiteur):
+        if limiteur:
+            ok, attente = limiteur.essayer()
+            if not ok:
+                raise PlafondAtteint(f"plafond du pont atteint, réessayer dans {attente} s")
+
+    def image(self, url):
+        if isinstance(url, str) and url.startswith("https://"):
+            mime, octets = telecharger_image(url)
+            return image_en_base64(f"data:{mime};base64,{base64.b64encode(octets).decode()}")
+        return image_en_base64(url)
+
+    def ocr_image(self, b64, modele=None):
+        """Texte d'une image par un modèle vision sans pièce (0 crédit)."""
+        self._reserver(self._limiteur)
+        corps = construire_corps_venice(modele or OCR_MODELE, [{"role": "user", "content": OCR_PROMPT}], None,
+                                        {"temperature": 0, "reasoning_effort": "none"})
+        corps["prompt"][-1]["imagePath"] = [b64]
+        return "".join(morceaux_contenu(discuter(self._jeton, corps))).strip()
+
+    def ocr_pdf(self, octets, modele=None):
+        """(textes par page, tronqué) d'un PDF scanné ; au plus OCR_PAGES_MAX pages."""
+        pages = pages_pdf(octets)
+        textes = []
+        for mime, page in pages[:OCR_PAGES_MAX]:
+            textes.append(self.ocr_image(image_en_base64(f"data:{mime};base64,{base64.b64encode(page).decode()}"), modele))
+        return textes, len(pages) > OCR_PAGES_MAX
+
+    def fichier(self, nom, octets):
+        if _type_image(octets):  # une image envoyée comme fichier : lue par OCR
+            return self.ocr_image(image_en_base64(f"data:{_type_image(octets)};base64,{base64.b64encode(octets).decode()}"))
+        pdf = octets.lstrip()[:5] == b"%PDF-"
+        try:
+            texte = analyser_fichier_venice(self._jeton, nom, octets)
+        except EntreeInvalide:
+            if not pdf:
+                raise
+            texte = ""
+        if texte.strip() or not pdf:
+            return texte
+        textes, tronque = self.ocr_pdf(octets)
+        return texte_des_pages(textes) + (f"\n\n[… tronqué après {OCR_PAGES_MAX} pages]" if tronque else "")
+
+    def audio(self, octets, format_audio):
+        """Texte d'un audio joint (Parakeet, route de transcription du site) ; une transcription déjà faite est réutilisée."""
+        import hashlib
+        cle = hashlib.sha256(octets).hexdigest()
+        with self._verrou:
+            if cle in self._transcriptions:
+                return self._transcriptions[cle]
+        self._reserver(self._limiteur_voix)
+        texte = transcrire_venice(self._jeton, octets, f"audio.{format_audio}", FORMATS_AUDIO[format_audio], False).get("text", "")
+        with self._verrou:
+            if len(self._transcriptions) >= 64:
+                self._transcriptions.pop(next(iter(self._transcriptions)))
+            self._transcriptions[cle] = texte
+        return texte
+
+
+def texte_des_pages(textes):
+    return "".join(t if i == 0 else f"\n\n--- page {i + 1} ---\n\n{t}" for i, t in enumerate(textes))
 
 
 def contient_images(messages):
@@ -491,6 +671,19 @@ def _donnees_fichier(partie, medias):
     return nom, medias.fichier(nom, octets)
 
 
+def _transcrire_audio(partie, medias):
+    a = partie.get("input_audio") or {}
+    if a.get("format") not in FORMATS_AUDIO or not isinstance(a.get("data"), str):
+        raise EntreeInvalide(f"audio : input_audio {{data en base64, format parmi {', '.join(FORMATS_AUDIO)}}} attendu")
+    try:
+        octets = base64.b64decode(a["data"], validate=True)
+    except ValueError:
+        raise EntreeInvalide("audio : base64 invalide") from None
+    if len(octets) > AUDIO_MAX_OCTETS:
+        raise EntreeTropGrosse(f"audio de {len(octets)} octets, maximum {AUDIO_MAX_OCTETS}")
+    return medias.audio(octets, a["format"])
+
+
 def _decouper(contenu, medias, avec_images):
     """Contenu d'un message OpenAI (chaîne ou liste de parties) -> (texte, images base64, textes de fichiers joints)."""
     if not isinstance(contenu, list):
@@ -505,8 +698,8 @@ def _decouper(contenu, medias, avec_images):
                 images.append(medias.image(_url_image(p)))
         elif genre == "file":
             fichiers.append(_donnees_fichier(p, medias))
-        elif genre in ("input_audio", "audio"):
-            raise EntreeInvalide("audio : entrée audio directe non prise en charge, utiliser /v1/audio/transcriptions")
+        elif genre == "input_audio":
+            texte.append(f"[Audio transcrit : {_transcrire_audio(p, medias)}]")
         else:
             texte.append(p.get("text", ""))
     return "".join(texte), images, fichiers
@@ -551,7 +744,7 @@ def construire_corps_venice(modele, messages, outils, params, medias=None):
         "clientProcessingTime": 5,
         "includeVeniceSystemPrompt": bool(params.get("include_venice_system_prompt", False)),
         "isCharacter": False,
-        "webEnabled": bool(params.get("web_search", False)),
+        "webEnabled": bool(params.get("web_search", False)) or "web_search_options" in params,
         "webScrapeEnabled": bool(params.get("web_scrape", False)),
         "xSearchEnabled": bool(params.get("x_search", False)),
         "temperature": params.get("temperature", 0.3),
@@ -772,6 +965,15 @@ ALIAS_TTS = {"tts-1": TTS_DEFAUT, "tts-1-hd": TTS_DEFAUT, "gpt-4o-mini-tts": TTS
 # les voix anglaises af_*, am_*, bf_*, bm_* lisent mal le français). Une voix Kokoro nommée passe telle quelle.
 VOIX_OPENAI = ("alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer", "verse")
 VOIX_DEFAUT = os.environ.get("VENICE_PONT_VOIX", "ff_siwis")
+# Édition d'image (route `inpaint` du site) : les 2 modèles sans pièce du catalogue, mesurés le 28/10/2026 (0 crédit, quota « inpaint » 1 000/jour).
+EDITS_GRATUITES = {"qwen-edit-uncensored": {}, "firered-image-edit": {}}
+EDIT_DEFAUT = "qwen-edit-uncensored"
+ALIAS_EDITS = {"dall-e-2": EDIT_DEFAUT, "gpt-image-1": EDIT_DEFAUT, "default": EDIT_DEFAUT}
+EDITS_MAX_PAR_REQUETE = 2
+ECHELLES_UPSCALE = (2, 4)     # mesurées à 0 crédit sur une image de 512 px
+EMBEDDING_MODELE = "text-embedding-bge-m3"
+EMBEDDINGS_MAX_ENTREES = 64
+EMBEDDINGS_MAX_CARACTERES = 8000
 TTS_MAX_CARACTERES = 4096
 ASR_MODELE = "nvidia/parakeet-tdt-0.6b-v3"
 FORMATS_ASR = ("json", "text", "verbose_json", "srt", "vtt")
@@ -924,6 +1126,36 @@ def transcrire_venice(jeton, octets, nom, mime, timestamps):
     return r.json()
 
 
+def _image_reponse(r):
+    genre = r.headers.get("content-type", "").split(";")[0]
+    if not genre.startswith("image/"):
+        raise ErreurVenice(502, f"Venice n'a pas renvoyé d'image ({genre}) : {r.text[:150]}")
+    return r.content, genre, {k.lower(): v for k, v in r.headers.items() if k.lower().startswith(("x-ratelimit", "x-venice"))}
+
+
+def editer_image_venice(jeton, modele, prompt, octets, nom, mime):
+    """Édition d'une image selon un texte (`/api/inference/inpaint`) : (octets, type MIME, en-têtes utiles)."""
+    return _image_reponse(_appeler_venice(jeton, "POST", "/inference/inpaint", data={"modelId": modele, "prompt": prompt},
+                                          files={"file": (nom, octets, mime)}, lecture=240))
+
+
+def agrandir_venice(jeton, octets, nom, mime, echelle):
+    """Agrandissement sans prompt (`/api/inference/enhance`)."""
+    return _image_reponse(_appeler_venice(jeton, "POST", "/inference/enhance", data={"scale": str(echelle), "enhance": "false"},
+                                          files={"file": (nom, octets, mime)}, lecture=240))
+
+
+def detourer_venice(jeton, data_url):
+    """Suppression de l'arrière-plan (`/api/inference/background-remove`) : PNG avec transparence."""
+    return _image_reponse(_appeler_venice(jeton, "POST", "/inference/background-remove", corps_json={"image_url": data_url}, lecture=120))
+
+
+def embeddings_venice(jeton, entrees):
+    """Vecteurs denses (`/api/app/memoria/embeddings`, bge-m3) déjà au format OpenAI ; `skipImportance` évite une erreur 500."""
+    return _appeler_venice(jeton, "POST", "/app/memoria/embeddings", lecture=60,
+                           corps_json={"encoding_format": "float", "input": entrees, "skipImportance": True}).json()
+
+
 def lire_quotas_venice(jeton):
     """Quotas du jour du compte (`/api/inference/rate-limits`) : {chat, conversation, image, inpaint, scrape} -> {remaining, resetAt}."""
     return _appeler_venice(jeton, "GET", "/inference/rate-limits", lecture=30).json()
@@ -1046,7 +1278,8 @@ def lister_modeles():
 
 
 def lister_modeles_image():
-    return [{"id": m, "object": "model", "owned_by": "venice-image"} for m in sorted(IMAGES_GRATUITES)]
+    return ([{"id": m, "object": "model", "owned_by": "venice-image"} for m in sorted(IMAGES_GRATUITES)]
+            + [{"id": m, "object": "model", "owned_by": "venice-image-edit"} for m in sorted(EDITS_GRATUITES)])
 
 
 def lister_modeles_audio():
@@ -1056,7 +1289,7 @@ def lister_modeles_audio():
 
 def fabriquer_handler(jeton, cle_pont, source=None, limiteur=None, suivi=None, limiteur_images=None, limiteur_voix=None,
                       quotas=None, medias=None):
-    medias = medias or Medias(jeton)
+    medias = medias or Medias(jeton, limiteur, limiteur_voix)
 
     class H(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -1148,7 +1381,9 @@ def fabriquer_handler(jeton, cle_pont, source=None, limiteur=None, suivi=None, l
                 return self._json(200, suivi.acquitter())
             routes = {"/v1/chat/completions": self._chat, "/chat/completions": self._chat,
                       "/v1/images/generations": self._images, "/v1/audio/speech": self._synthese,
-                      "/v1/audio/transcriptions": self._transcription}
+                      "/v1/audio/transcriptions": self._transcription, "/v1/embeddings": self._embeddings, "/v1/ocr": self._ocr,
+                      "/v1/images/edits": self._edition, "/v1/images/upscale": self._agrandissement,
+                      "/v1/images/remove-background": self._detourage}
             if chemin not in routes:
                 return self._json(404, {"error": {"message": "inconnu"}})
             try:
@@ -1263,6 +1498,128 @@ def fabriquer_handler(jeton, cle_pont, source=None, limiteur=None, suivi=None, l
             res = transcrire_venice(jeton, octets, nom or "voix.mp3", mime, format_reponse in ("verbose_json", "srt", "vtt"))
             genre, data = formater_transcription(res, format_reponse)
             self._octets(200, data, genre)
+
+        def _entree_image(self, corps):
+            """(champs, nom, type MIME, octets) d'une requête d'image : multipart (fichier `image`) ou JSON (`image` en data URL ou https)."""
+            if (self.headers.get("Content-Type") or "").lower().startswith("multipart/form-data"):
+                champs, fichiers = lire_multipart(self.headers.get("Content-Type"), corps)
+                f = fichiers.get("image") or fichiers.get("image[]") or fichiers.get("file")
+                if not f:
+                    raise EntreeInvalide("image : fichier `image` requis")
+                nom, mime, octets = f
+                if len(octets) > IMAGE_MAX_OCTETS:
+                    raise EntreeInvalide(f"image trop lourde ({len(octets)} octets, maximum {IMAGE_MAX_OCTETS})")
+                return {k: (True if v == "true" else v) for k, v in champs.items()}, nom or "image.png", mime or "image/png", octets
+            req = self._json_requis(corps)
+            url = req.get("image")
+            if isinstance(url, str) and url.startswith("https://"):
+                mime, octets = telecharger_image(url)
+            else:
+                m = _DATA_IMAGE.match(url or "") if isinstance(url, str) else None
+                if not m:
+                    raise EntreeInvalide("image : data URL data:image/<type>;base64,... ou adresse https attendue")
+                mime, octets = m.group(1).lower(), base64.b64decode(image_en_base64(url))
+            return req, "image." + mime.split("/")[1], mime, octets
+
+        def _sortie_images(self, donnees, quota=None, restant=None):
+            self._json(200, {"created": int(time.time()), "data": donnees},
+                       {f"X-Venice-Quota-{quota}-Restant": str(restant)} if restant is not None else None)
+
+        def _ocr(self, corps):
+            if (self.headers.get("Content-Type") or "").lower().startswith("multipart/form-data"):
+                champs, fichiers = lire_multipart(self.headers.get("Content-Type"), corps)
+                f = fichiers.get("file") or fichiers.get("image")
+                nom, octets = (f[0], f[2]) if f else (None, None)
+            else:
+                champs = self._json_requis(corps)
+                nom, octets = champs.get("filename") or "document", None
+                donnees = champs.get("file_data") or champs.get("image")
+                if isinstance(donnees, str) and donnees.startswith("https://"):
+                    mime, octets = telecharger_image(donnees)
+                elif isinstance(donnees, str) and donnees:
+                    try:
+                        octets = base64.b64decode(donnees.split("base64,", 1)[-1], validate=True)
+                    except ValueError:
+                        raise EntreeInvalide("ocr : base64 invalide") from None
+            if not octets:
+                raise EntreeInvalide("ocr : `image` (data URL ou https), `file_data` ou fichier `file` requis")
+            if len(octets) > FICHIER_MAX_OCTETS:
+                raise EntreeTropGrosse(f"fichier trop lourd (maximum {FICHIER_MAX_OCTETS} octets)")
+            modele = champs.get("model") or OCR_MODELE
+            if modele not in VISION_GRATUITS and champs.get("autoriser_debit") is not True:
+                return self._erreur(400, "modele_sans_vision", f"{modele} n'est pas un modèle vision sans pièce : {', '.join(VISION_GRATUITS)}.")
+            tronque = False
+            if _type_image(octets):
+                pages = [medias.ocr_image(base64.b64encode(octets).decode(), modele)]
+            elif octets.lstrip()[:5] == b"%PDF-":
+                pages, tronque = medias.ocr_pdf(octets, modele)
+            else:
+                pages = [analyser_fichier_venice(jeton, nom or "document", octets)]
+            self._json(200, {"text": texte_des_pages(pages), "pages": pages, "tronque": tronque, "model": modele})
+
+        def _embeddings(self, corps):
+            req = self._json_requis(corps)
+            entrees = req.get("input")
+            entrees = [entrees] if isinstance(entrees, str) else entrees
+            if (not isinstance(entrees, list) or not entrees or len(entrees) > EMBEDDINGS_MAX_ENTREES
+                    or not all(isinstance(e, str) and 0 < len(e) <= EMBEDDINGS_MAX_CARACTERES for e in entrees)):
+                raise EntreeInvalide(f"input : texte ou liste de 1 à {EMBEDDINGS_MAX_ENTREES} textes non vides "
+                                     f"({EMBEDDINGS_MAX_CARACTERES} caractères au plus chacun)")
+            if req.get("encoding_format") not in (None, "float"):
+                raise EntreeInvalide("encoding_format : float seulement")
+            if not self._limite(limiteur):
+                return
+            rep = embeddings_venice(jeton, entrees)
+            self._json(200, {**rep, "model": rep.get("model", EMBEDDING_MODELE)})
+
+        def _edition(self, corps):
+            req, nom, mime, octets = self._entree_image(corps)
+            prompt = req.get("prompt")
+            if not isinstance(prompt, str) or not prompt.strip():
+                raise EntreeInvalide("prompt : texte non vide requis")
+            modele = ALIAS_EDITS.get(req.get("model") or "default", req.get("model"))
+            try:
+                n = int(req.get("n", 1))
+            except (TypeError, ValueError):
+                n = 0
+            if not 1 <= n <= EDITS_MAX_PAR_REQUETE:
+                raise EntreeInvalide(f"n : entier de 1 à {EDITS_MAX_PAR_REQUETE} attendu")
+            if self._refus_payant(modele, req, EDITS_GRATUITES):
+                return
+            restant = quotas.restant("inpaint") if quotas else None
+            if restant is not None and restant - n < QUOTA_IMAGE_MINIMUM:
+                return self._erreur(429, "quota_images_epuise", f"quota d'éditions du jour presque épuisé ({restant} restantes)")
+            if not self._limite(limiteur_images, n):
+                return
+            donnees = []
+            for _ in range(n):
+                image, _genre, entetes = editer_image_venice(jeton, modele, prompt, octets, nom, mime)
+                if entetes.get("x-venice-is-content-violation") == "true":
+                    return self._erreur(400, "content_policy_violation", "Venice a refusé l'image (contenu)")
+                if quotas and entetes.get("x-ratelimit-remaining", "").isdigit():
+                    quotas.noter("inpaint", int(entetes["x-ratelimit-remaining"]))
+                donnees.append({"b64_json": base64.b64encode(image).decode()})
+            self._sortie_images(donnees, "Inpaint", quotas.restant("inpaint") if quotas else None)
+
+        def _agrandissement(self, corps):
+            req, nom, mime, octets = self._entree_image(corps)
+            try:
+                echelle = int(req.get("scale", 2))
+            except (TypeError, ValueError):
+                echelle = 0
+            if echelle not in ECHELLES_UPSCALE:
+                raise EntreeInvalide(f"scale : {' ou '.join(map(str, ECHELLES_UPSCALE))}")
+            if not self._limite(limiteur_images):
+                return
+            image, _genre, _entetes = agrandir_venice(jeton, octets, nom, mime, echelle)
+            self._sortie_images([{"b64_json": base64.b64encode(image).decode()}])
+
+        def _detourage(self, corps):
+            _req, _nom, mime, octets = self._entree_image(corps)
+            if not self._limite(limiteur_images):
+                return
+            image, _genre, _entetes = detourer_venice(jeton, f"data:{mime};base64,{base64.b64encode(octets).decode()}")
+            self._sortie_images([{"b64_json": base64.b64encode(image).decode()}])
 
         def _sse(self, rep):
             morceaux = morceaux_sse(rep)

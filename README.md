@@ -13,7 +13,7 @@ L'API publique de Venice est facturée à l'usage. L'abonnement Pro donne, **sur
 
 1. fabrique un jeton Clerk de 60 s à partir du cookie `__client` de votre compte (et le renouvelle),
 2. parle à `outerface.venice.ai`, le service que le site utilise,
-3. expose une API **OpenAI-compatible** locale (`/v1/chat/completions`, `/v1/models`, flux SSE), avec des **appels d'outils émulés** (les définitions d'outils passent dans le prompt, la réponse JSON est transformée en `tool_calls`),
+3. expose une API **OpenAI-compatible** locale (`/v1/chat/completions`, `/v1/models`, flux SSE), avec des **appels d'outils émulés** (les définitions d'outils passent dans le prompt, la réponse JSON est transformée en `tool_calls`), et le **multimodal** : vision, PDF et **OCR**, audio, génération et édition d'images, voix, embeddings, recherche web ([docs/MULTIMODAL.md](docs/MULTIMODAL.md)),
 4. **refuse** les modèles payants (HTTP 403), plafonne le débit, et surveille votre solde de crédits.
 
 ## Architecture
@@ -119,7 +119,7 @@ Windows : le pont est en Python standard et la CI l'essaie, mais l'auteur n'a pa
 | `harness NOM [--modele M] [--appliquer]` | configuration pour un client (`opencode`, `openai`, `omniroute`, `hermes`, `openwebui`, `aider`, `cline`, `continue`, `codex`, `claude-code`) |
 | `profils` | liste les profils (un profil = un compte = un pont) |
 
-Tests : `python -m pytest tests pont/tests` (138 tests, aucun appel réseau).
+Tests : `python -m pytest tests pont/tests` (208 tests, aucun appel réseau).
 
 ## Ce qui n'est pas pris en charge
 

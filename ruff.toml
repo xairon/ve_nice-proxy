@@ -1,4 +1,4 @@
-line-length = 140
+line-length = 160
 target-version = "py39"
 extend-exclude = ["venice-setup"]   # CLI sans extension .py : vérifié par les tests
 

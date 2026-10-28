@@ -2,7 +2,6 @@
 import importlib.machinery
 import importlib.util
 import json
-import os
 import stat
 from pathlib import Path
 
@@ -64,10 +63,6 @@ def test_unite_sans_variable_non_remplacee(vs, tmp_path):
 
 def test_install_dry_run_n_ecrit_pas_l_unite(vs, tmp_path, capsys):
     login(vs, tmp_path)
-    try:
-        import requests  # noqa: F401
-    except ImportError:
-        pytest.skip("requests absent")
     assert vs.main(["install", "--dry-run"]) == 0
     assert not (tmp_path / "systemd").exists()
     assert "[dry-run]" in capsys.readouterr().out

@@ -5,10 +5,11 @@ Durée : 5 minutes. Tout est fait en **utilisateur normal** (pas de `sudo`).
 ## 1. Prérequis
 
 ```bash
-python3 --version          # 3.9 ou plus
-python3 -c "import requests; print(requests.__version__)"   # sinon : pip install --user requests
-systemctl --user status    # doit répondre (session systemd utilisateur)
+python3 --version          # 3.9 ou plus (aucun module à installer)
+systemctl --user status    # Linux : doit répondre (session systemd utilisateur) ; sinon voir « Sans systemd » plus bas
 ```
+
+Raccourci : `python3 venice-setup quickstart` enchaîne les étapes 3 à 5 ci-dessous (et la configuration d'un client).
 
 Pour que le service survive à la fermeture de votre session (serveur sans écran) : `loginctl enable-linger "$USER"`.
 
@@ -17,7 +18,7 @@ Pour que le service survive à la fermeture de votre session (serveur sans écra
 ```bash
 git clone https://github.com/xairon/ve_nice-proxy
 cd ve_nice-proxy
-python3 -m pytest tests pont/tests   # facultatif ; demande pytest ; 76 tests, aucun appel réseau
+python3 -m pytest tests pont/tests   # facultatif ; demande pytest ; tests sans aucun appel réseau (un garde-fou le garantit)
 ```
 
 ## 3. Enregistrer le cookie (`login`)
@@ -109,3 +110,22 @@ Chaque fichier modifié par `harness opencode --appliquer` est sauvegardé juste
 | `VENICE_PONT_AUTORISER_PAYANTS` | `1` : accepte les modèles payants (**débite des crédits**) | non |
 
 Écouter ailleurs que sur `127.0.0.1` (par exemple l'adresse d'un VPN privé pour qu'une autre machine du réseau utilise le pont) est possible, mais le pont n'a ni TLS ni autre protection que sa clé : ne jamais l'exposer à Internet ([SECURITE.md](SECURITE.md)).
+
+## Sans systemd : macOS, Windows, essai rapide
+
+```bash
+python3 venice-setup login
+python3 venice-setup run        # au premier plan ; Ctrl+C arrête. Le pont écoute sur 127.0.0.1:8700
+```
+
+Dans un autre terminal : `python3 venice-setup status`. Sous Windows, utilisez `python` ; les permissions 600 ne s'y appliquent pas (le dossier de votre profil utilisateur fait la protection) : n'y mettez que votre compte personnel. Windows n'a pas été essayé par l'auteur.
+
+## Docker
+
+```bash
+python3 venice-setup login                 # écrit ~/.config/venice-setup/defaut/venice.env
+docker compose up -d --build               # image python:3.12-slim, utilisateur non root, 256 Mo, 127.0.0.1:8700
+curl -s http://127.0.0.1:8700/health
+```
+
+Variables facultatives : `PUID` / `PGID` (utilisateur du dossier de secrets, 1000 par défaut), `VENICE_PORT`, `VENICE_DATA` (dossier de secrets du profil). Le conteneur met à jour le cookie dans ce dossier quand Clerk le renouvelle. Récupérer la clé du pont : `grep VENICE_PONT_CLE ~/.config/venice-setup/defaut/venice.env`.

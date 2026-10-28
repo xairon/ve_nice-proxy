@@ -1,0 +1,19 @@
+# Pont Venice en conteneur. Préparer d'abord les secrets : `python3 venice-setup login` écrit
+# ~/.config/venice-setup/defaut/venice.env (cookie + clé du pont). Le conteneur lit et met à jour ce dossier.
+#   docker compose up -d --build
+#   curl -s http://127.0.0.1:8700/health
+services:
+  venice-pont:
+    build: .
+    image: venice-pont:0.1.0
+    container_name: venice-pont
+    user: "${PUID:-1000}:${PGID:-1000}"          # le dossier de secrets est en 700, à votre nom
+    ports:
+      - "127.0.0.1:${VENICE_PORT:-8700}:8700"    # local seulement : ne jamais publier ce port sur Internet
+    volumes:
+      - "${VENICE_DATA:-${HOME}/.config/venice-setup/defaut}:/data"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    restart: unless-stopped

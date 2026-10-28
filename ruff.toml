@@ -1,0 +1,7 @@
+line-length = 140
+target-version = "py39"
+extend-exclude = ["venice-setup"]   # CLI sans extension .py : vérifié par les tests
+
+[lint]
+select = ["E", "F", "W", "B"]
+ignore = ["E701", "E702", "E731"]

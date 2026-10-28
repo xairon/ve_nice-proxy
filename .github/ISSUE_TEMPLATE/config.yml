@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Faille de sécurité (privé)
+    url: https://github.com/xairon/ve_nice-proxy/security/advisories/new
+    about: Ne publiez jamais un cookie, une clé ou un jeton dans une issue.

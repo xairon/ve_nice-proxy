@@ -16,6 +16,9 @@ import socket
 import sys
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import uuid
 from email import policy
 from email.parser import BytesParser
@@ -30,6 +33,147 @@ SESSION = "https://venice.ai/api/user/session"
 API_WEB = "https://outerface.venice.ai/api"
 UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/130 Safari/537.36"
 EN_TETES_WEB = {"User-Agent": UA, "Origin": "https://venice.ai", "Referer": "https://venice.ai/"}
+
+
+# --- client HTTP minimal (bibliothèque standard seule : le pont n'a aucune dépendance) ------------------------------
+
+class ErreurReseau(Exception):
+    """Connexion impossible ou coupée."""
+
+
+class DelaiDepasse(ErreurReseau):
+    """Aucune réponse dans le délai."""
+
+
+class ErreurHTTP(Exception):
+    def __init__(self, reponse):
+        super().__init__(f"HTTP {reponse.status_code}")
+        self.response = reponse
+
+
+class Reponse:
+    def __init__(self, brute):
+        self.raw = brute  # http.client.HTTPResponse ou urllib.error.HTTPError : `.headers.get_all()` lit les Set-Cookie
+        self.status_code, self.headers = brute.status if hasattr(brute, "status") else brute.code, brute.headers
+        self.encoding = "utf-8"  # Venice répond text/html sans charset : le décodage reste en UTF-8
+        self._contenu = None
+
+    @property
+    def content(self):
+        if self._contenu is None:
+            try:
+                self._contenu = self.raw.read()
+            except (OSError, ValueError) as e:  # TimeoutError, connexion coupée, IncompleteRead
+                raise _erreur_reseau(e) from None
+        return self._contenu
+
+    def lire(self):
+        return self.content
+
+    @property
+    def text(self):
+        return self.content.decode("utf-8", "replace")
+
+    def json(self):
+        return json.loads(self.content)
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise ErreurHTTP(self)
+
+    def iter_lines(self, decode_unicode=False):
+        try:
+            for ligne in iter(self.raw.readline, b""):
+                ligne = ligne.rstrip(b"\r\n")
+                yield ligne.decode("utf-8", "replace") if decode_unicode else ligne
+        except (OSError, ValueError) as e:
+            raise _erreur_reseau(e) from None
+
+    def iter_content(self, taille=65536):
+        try:
+            for bloc in iter(lambda: self.raw.read(taille), b""):
+                yield bloc
+        except (OSError, ValueError) as e:
+            raise _erreur_reseau(e) from None
+
+    def close(self):
+        self.raw.close()
+
+
+def _erreur_reseau(e):
+    cause = getattr(e, "reason", e)
+    if isinstance(cause, (socket.timeout, TimeoutError)):
+        return DelaiDepasse("délai dépassé")
+    return ErreurReseau(str(cause)[:200])
+
+
+class _SansRedirection(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *a, **k):
+        return None
+
+
+def _multipart(champs, fichiers):
+    limite = uuid.uuid4().hex
+    corps = b""
+    for nom, valeur in (champs or {}).items():
+        corps += f'--{limite}\r\nContent-Disposition: form-data; name="{nom}"\r\n\r\n{valeur}\r\n'.encode()
+    for nom, (fichier, octets, *mime) in (fichiers or {}).items():
+        corps += (f'--{limite}\r\nContent-Disposition: form-data; name="{nom}"; filename="{fichier}"\r\n'
+                  f"Content-Type: {mime[0] if mime else 'application/octet-stream'}\r\n\r\n").encode() + octets + b"\r\n"
+    return corps + f"--{limite}--\r\n".encode(), f"multipart/form-data; boundary={limite}"
+
+
+def requete(methode, url, params=None, corps_json=None, data=None, files=None, headers=None, timeout=60,
+            stream=False, suivre_redirections=True):
+    """Requête HTTP(S) : Reponse (statut >= 400 compris, sans exception) ; ErreurReseau / DelaiDepasse sinon."""
+    if params:
+        url += ("&" if "?" in url else "?") + urllib.parse.urlencode(params)
+    entetes, corps = {"Accept-Encoding": "identity", **(headers or {})}, None
+    if files:
+        corps, entetes["Content-Type"] = _multipart(data, files)
+    elif corps_json is not None:
+        corps, entetes["Content-Type"] = json.dumps(corps_json, ensure_ascii=False).encode(), "application/json"
+    elif methode == "POST":
+        corps = b""
+    ouvreur = urllib.request.build_opener(*([] if suivre_redirections else [_SansRedirection]))
+    try:
+        brute = ouvreur.open(urllib.request.Request(url, data=corps, headers=entetes, method=methode), timeout=timeout)
+    except urllib.error.HTTPError as e:
+        brute = e
+    except (urllib.error.URLError, OSError) as e:
+        raise _erreur_reseau(e) from None
+    r = Reponse(brute)
+    if not stream:
+        r.lire()  # lit tout de suite : les erreurs réseau remontent ici
+        r.close()
+    return r
+
+
+class Session:
+    """En-têtes communs et cookies conservés d'un appel à l'autre (les Set-Cookie du serveur les mettent à jour)."""
+
+    def __init__(self):
+        self.headers, self.cookies = {}, {}
+
+    def _appeler(self, methode, url, params=None, timeout=30, headers=None):
+        entetes = {**self.headers, **(headers or {})}
+        if self.cookies:
+            entetes["Cookie"] = "; ".join(f"{k}={v}" for k, v in self.cookies.items())
+        r = requete(methode, url, params=params, headers=entetes, timeout=timeout)
+        for brut in r.headers.get_all("Set-Cookie") or []:
+            attributs = [a.strip() for a in brut.split(";")]
+            nom, _, valeur = attributs[0].partition("=")
+            if valeur == "" or "max-age=0" in (a.lower() for a in attributs[1:]):
+                self.cookies.pop(nom.strip(), None)
+            else:
+                self.cookies[nom.strip()] = valeur
+        return r
+
+    def get(self, url, **kw):
+        return self._appeler("GET", url, **kw)
+
+    def post(self, url, **kw):
+        return self._appeler("POST", url, **kw)
 
 
 class CookieExpire(Exception):
@@ -72,10 +216,9 @@ def _nouveau_cookie(reponse):
 
 
 def _session_web(cookie):
-    import requests
-    s = requests.Session()
+    s = Session()
     s.headers.update(EN_TETES_WEB)
-    s.cookies.set("__client", cookie, domain="clerk.venice.ai")
+    s.cookies["__client"] = cookie
     return s
 
 
@@ -267,8 +410,7 @@ def telecharger_image(url):
         raise EntreeInvalide("image : adresse introuvable") from None
     if not infos or not all(adresse_publique(i[4][0]) for i in infos):
         raise EntreeInvalide("image : adresse non publique refusée")
-    import requests
-    r = requests.get(url, stream=True, timeout=(10, 30), allow_redirects=False, headers={"User-Agent": UA})
+    r = requete("GET", url, stream=True, timeout=30, suivre_redirections=False, headers={"User-Agent": UA})
     try:
         if r.status_code != 200:
             raise EntreeInvalide(f"image : téléchargement refusé ({r.status_code})")
@@ -285,10 +427,9 @@ def telecharger_image(url):
 
 def analyser_fichier_venice(jeton, nom, octets):
     """Texte d'un fichier joint (route `text_parser` du site, 0 crédit). Un PDF scanné sans texte est refusé (400)."""
-    import requests
     for essai in (1, 2):
-        r = requests.post(f"{API_WEB}/inference/text_parser", timeout=(15, 120), files={"file": (nom, octets)},
-                          headers={**EN_TETES_WEB, "Referer": "https://venice.ai/chat", "Authorization": "Bearer " + jeton.obtenir()})
+        r = requete("POST", f"{API_WEB}/inference/text_parser", timeout=120, files={"file": (nom, octets)},
+                    headers={**EN_TETES_WEB, "Referer": "https://venice.ai/chat", "Authorization": "Bearer " + jeton.obtenir()})
         if r.status_code == 401 and essai == 1:
             jeton.invalider()
             continue
@@ -515,9 +656,8 @@ def lire_env(chemin):
 
 def discuter(jeton, corps):
     """Itérateur de lignes NDJSON ; rejoue une fois avec un jeton neuf sur 401."""
-    import requests
     for essai in (1, 2):
-        r = requests.post(OUTERFACE, json=corps, stream=True, timeout=(15, 180), headers={
+        r = requete("POST", OUTERFACE, corps_json=corps, stream=True, timeout=180, headers={
             **EN_TETES_WEB, "Referer": "https://venice.ai/chat", "Authorization": "Bearer " + jeton.obtenir()})
         if r.status_code == 401 and essai == 1:
             jeton.invalider()
@@ -525,8 +665,7 @@ def discuter(jeton, corps):
             continue
         if r.status_code != 200:
             raise RuntimeError(f"Venice {r.status_code}: {r.text[:200]}")
-        r.encoding = "utf-8"  # Venice répond text/html sans charset : requests supposerait ISO-8859-1
-        return r.iter_lines(decode_unicode=True)
+        return r.iter_lines(decode_unicode=True)  # Venice répond text/html sans charset : le décodage est en UTF-8
 
 
 MODELES_AGENT = set(filter(None, os.environ.get(
@@ -578,20 +717,18 @@ def lire_flux_agent(lignes):
 
 def discuter_agent(jeton, modele, corps):
     """Appelle la route agents ; rejoue une fois avec un jeton neuf sur 401. Renvoie (texte, jetons)."""
-    import requests
     for essai in (1, 2):
-        r = requests.post(AGENTS, params={"agentModelId": modele}, stream=True, timeout=(15, 300),
-                          json={"clientTools": [], "input": {"messages": messages_agent(corps)}},
-                          headers={**EN_TETES_WEB, "Referer": "https://venice.ai/chat",
-                                   "Accept": "text/event-stream", "x-venice-locale": "en",
-                                   "Authorization": "Bearer " + jeton.obtenir()})
+        r = requete("POST", AGENTS, params={"agentModelId": modele}, stream=True, timeout=300,
+                    corps_json={"clientTools": [], "input": {"messages": messages_agent(corps)}},
+                    headers={**EN_TETES_WEB, "Referer": "https://venice.ai/chat",
+                             "Accept": "text/event-stream", "x-venice-locale": "en",
+                             "Authorization": "Bearer " + jeton.obtenir()})
         if r.status_code == 401 and essai == 1:
             jeton.invalider()
             r.close()
             continue
         if r.status_code != 200:
             raise RuntimeError(f"Venice {r.status_code}: {r.text[:200]}")
-        r.encoding = "utf-8"
         return lire_flux_agent(r.iter_lines(decode_unicode=True))
 
 
@@ -669,8 +806,7 @@ def decoder_solde(jwt):
 
 
 def lire_solde(jeton):
-    import requests
-    r = requests.get(SESSION, timeout=30, headers={**EN_TETES_WEB, "Authorization": "Bearer " + jeton.obtenir()})
+    r = requete("GET", SESSION, timeout=30, headers={**EN_TETES_WEB, "Authorization": "Bearer " + jeton.obtenir()})
     r.raise_for_status()
     return decoder_solde(r.json()["token"])
 
@@ -744,14 +880,12 @@ class ErreurVenice(Exception):
 
 def _appeler_venice(jeton, methode, chemin, **kw):
     """Appel d'une route du site ; rejoue une fois avec un jeton neuf sur 401. Renvoie la réponse HTTP (statut 200 garanti)."""
-    import requests
     lecture = kw.pop("lecture", 120)
     for essai in (1, 2):
         try:
-            r = requests.request(methode, f"{API_WEB}{chemin}", timeout=(15, lecture), **kw,
-                                 headers={**EN_TETES_WEB, "Referer": "https://venice.ai/chat",
-                                          "Authorization": "Bearer " + jeton.obtenir()})
-        except requests.Timeout:
+            r = requete(methode, f"{API_WEB}{chemin}", timeout=lecture, **kw,
+                        headers={**EN_TETES_WEB, "Referer": "https://venice.ai/chat", "Authorization": "Bearer " + jeton.obtenir()})
+        except DelaiDepasse:
             raise ErreurVenice(504, "Venice n'a pas répondu à temps") from None
         if r.status_code == 401 and essai == 1:
             jeton.invalider()
@@ -767,7 +901,7 @@ def _appeler_venice(jeton, methode, chemin, **kw):
 
 def generer_image_venice(jeton, corps):
     """(octets, type MIME, en-têtes utiles) d'une image générée par `/api/inference/image` du site."""
-    r = _appeler_venice(jeton, "POST", "/inference/image", json=corps, lecture=240)
+    r = _appeler_venice(jeton, "POST", "/inference/image", corps_json=corps, lecture=240)
     genre = r.headers.get("content-type", "").split(";")[0]
     if not genre.startswith("image/"):
         raise ErreurVenice(502, f"Venice n'a pas renvoyé d'image ({genre}) : {r.text[:150]}")
@@ -777,7 +911,7 @@ def generer_image_venice(jeton, corps):
 def synthese_vocale_venice(jeton, corps):
     """(octets, type MIME) de la synthèse vocale `/api/inference/tts` (le site rejoue les réponses vides)."""
     for _ in range(2):
-        r = _appeler_venice(jeton, "POST", "/inference/tts", json=corps, lecture=90)
+        r = _appeler_venice(jeton, "POST", "/inference/tts", corps_json=corps, lecture=90)
         if r.content:
             return r.content, r.headers.get("content-type", "audio/mpeg").split(";")[0]
     raise ErreurVenice(502, "Venice a renvoyé un audio vide")
@@ -870,7 +1004,8 @@ def formater_transcription(res, format_reponse):
     texte = res.get("text", "")
     segments = [{"id": i, "start": t["start"], "end": t["end"], "text": t["text"]} for i, t in enumerate(res.get("timestamps") or [])]
     if format_reponse in ("srt", "vtt") and not segments:  # mesuré le 28/10/2026 : la route ne renvoie aucun horodatage
-        raise EntreeInvalide(f"{format_reponse} : Venice ne fournit pas d'horodatage sur cette route (json, text ou verbose_json sans segments)")
+        raise EntreeInvalide(f"{format_reponse} : Venice ne fournit pas d'horodatage sur cette route "
+                             "(json, text ou verbose_json sans segments)")
     if format_reponse == "text":
         return "text/plain; charset=utf-8", texte.encode()
     if format_reponse == "verbose_json":

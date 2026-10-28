@@ -271,25 +271,35 @@ def test_alerte_quand_le_cookie_expire_bientot(tmp_path):
 
 
 def test_flux_venice_decode_en_utf8_malgre_le_content_type_html(monkeypatch):
-    """Venice répond text/html sans charset : requests supposait ISO-8859-1 et 'é' sortait 'Ã©' (mesuré le 28/10/2026)."""
-    import types
+    """Venice répond text/html sans charset : un client qui suppose ISO-8859-1 sort 'Ã©' pour 'é' (mesuré le 28/10/2026)."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
 
-    class _Rep:
-        status_code = 200
-        encoding = "ISO-8859-1"
+    class _Venice(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
 
-        def iter_lines(self, decode_unicode=False):
-            octets = '{"content":"été","kind":"content"}'.encode("utf-8")
-            assert decode_unicode and self.encoding == "utf-8"
-            yield octets.decode(self.encoding)
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            corps = '{"content":"été","kind":"content"}\n'.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(corps)))
+            self.end_headers()
+            self.wfile.write(corps)
 
-    monkeypatch.setitem(sys.modules, "requests", types.SimpleNamespace(post=lambda *a, **k: _Rep()))
+    srv = HTTPServer(("127.0.0.1", 0), _Venice)  # serveur local : un test n'appelle jamais le vrai Venice
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    monkeypatch.setattr(vp, "OUTERFACE", f"http://127.0.0.1:{srv.server_address[1]}/chat")
 
     class _Jeton:
         def obtenir(self):
             return "j"
 
-    assert "".join(vp.morceaux_contenu(vp.discuter(_Jeton(), {}))) == "été"
+    try:
+        assert "".join(vp.morceaux_contenu(vp.discuter(_Jeton(), {}))) == "été"
+    finally:
+        srv.shutdown()
 
 
 def test_serveur_accepte_une_rafale_de_16_connexions():

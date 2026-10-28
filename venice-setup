@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """venice-setup : brancher un compte Venice (abonnement Pro) sur vos outils d'IA, par un pont OpenAI-compatible local.
 
-Sous-commandes : login, status, models, install, uninstall, harness, profils.
+Sous-commandes : quickstart, login, run, install, status, models, uninstall, harness, profils.
 Chaque commande qui écrit accepte --dry-run. Aucun secret n'est jamais affiché ni écrit hors d'un fichier en mode 600.
 AVERTISSEMENT : les CGU de Venice interdisent l'usage programmatique du compte web. Voir README.md.
 """
@@ -24,6 +24,7 @@ ICI = Path(__file__).resolve().parent
 sys.path.insert(0, str(ICI / "pont"))
 
 RACINE = Path(os.environ.get("VENICE_SETUP_HOME", "~/.config/venice-setup")).expanduser()
+VERSION = "0.1.0"
 PORT_DE_BASE = 8700
 HOTE_DEFAUT = "127.0.0.1"
 
@@ -211,6 +212,10 @@ def dossier_unites() -> Path:
     return Path(os.environ.get("VENICE_SETUP_SYSTEMD", "~/.config/systemd/user")).expanduser()
 
 
+def systemd_disponible() -> bool:
+    return sys.platform.startswith("linux") and shutil.which("systemctl") is not None
+
+
 def systemctl(*args, simule=False):
     cmd = ["systemctl", "--user", *args]
     if simule:
@@ -223,12 +228,9 @@ def cmd_install(a) -> int:
     p = profil(a.profil)
     if not p["env"].exists():
         raise Erreur(f"Pas de secrets pour '{a.profil}'. Lancez : venice-setup login --profil {a.profil}")
-    if sys.version_info < (3, 9):
-        raise Erreur("Python 3.9 ou plus requis.")
-    try:
-        import requests  # noqa: F401
-    except ImportError:
-        raise Erreur("Le module Python 'requests' manque (le pont l'utilise pour parler à Venice) : pip install --user requests")
+    if not systemd_disponible() and not a.dry_run:
+        raise Erreur("systemd utilisateur introuvable (macOS, Windows, conteneur...). Lancez le pont au premier plan : "
+                     f"venice-setup run --profil {a.profil}  (ou Docker : docs/INSTALL.md).")
     chemin_pont = ICI / "pont" / "venice_pont.py"
     texte = unite(p, chemin_pont)
     cible = dossier_unites() / f"{p['service']}.service"
@@ -368,6 +370,45 @@ claude --model {m}
     return 0
 
 
+def cmd_run(a) -> int:
+    """Lance le pont au premier plan (toutes plateformes, sans systemd) ; Ctrl+C l'arrête."""
+    p = profil(a.profil)
+    if not p["env"].exists():
+        raise Erreur(f"Pas de secrets pour '{a.profil}'. Lancez : venice-setup login --profil {a.profil}")
+    cmd = [sys.executable, str(ICI / "pont" / "venice_pont.py")]
+    env = {**os.environ, "VENICE_PONT_ENV": str(p["env"]), "VENICE_PONT_ECOUTE": f"{p['hote']}:{p['port']}",
+           "VENICE_PONT_CREDITS": str(p["credits"])}
+    if a.dry_run:
+        print(f"[dry-run] lancerait : {' '.join(cmd)}\n  VENICE_PONT_ECOUTE={env['VENICE_PONT_ECOUTE']} VENICE_PONT_ENV={p['env']}")
+        return 0
+    print(f"Pont '{a.profil}' sur {url_pont(p)} (Ctrl+C pour arrêter). Clé : VENICE_PONT_CLE dans {p['env']}")
+    try:
+        return subprocess.run(cmd, env=env).returncode
+    except KeyboardInterrupt:
+        return 0
+
+
+def cmd_quickstart(a) -> int:
+    """login > service (ou instruction `run`) > état > configuration du client : l'installation en une commande."""
+    a.nom = a.harnais
+    print("== 1/4 login ==")
+    cmd_login(a)
+    if a.dry_run:  # le profil n'existe pas encore : les étapes suivantes ne peuvent que se décrire
+        print(f"\n[dry-run] ensuite : service ({'systemd utilisateur' if systemd_disponible() else 'venice-setup run'}), "
+              f"état du pont, configuration du client '{a.harnais}'.")
+        return 0
+    print("\n== 2/4 service ==")
+    if systemd_disponible():
+        cmd_install(a)  # affiche l'état en dernière ligne (3/4)
+    else:
+        print("systemd utilisateur absent : lancez le pont dans un terminal séparé : "
+              f"venice-setup run --profil {a.profil}\n(ou Docker : docs/INSTALL.md)")
+    print("\n== 3/4 état ==  (déjà affiché ci-dessus si le service est installé ; sinon : venice-setup status après `run`)")
+    print(f"\n== 4/4 client : {a.harnais} ==")
+    cmd_harness(a)
+    return 0
+
+
 def cmd_profils(a) -> int:
     for nom, p in lire_profils().items():
         print(f"{nom}\t{p['hote']}:{p['port']}")
@@ -376,6 +417,7 @@ def cmd_profils(a) -> int:
 
 def construire_parseur() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="venice-setup", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--version", action="version", version=f"venice-setup {VERSION}")
     sp = ap.add_subparsers(dest="cmd", required=True)
 
     def sous(nom, f, aide):
@@ -388,6 +430,11 @@ def construire_parseur() -> argparse.ArgumentParser:
     s.add_argument("--cookie-fichier"); s.add_argument("--sans-verification", action="store_true"); s.add_argument("--dry-run", action="store_true")
     sous("status", cmd_status, "santé du pont, cookie, crédits")
     s = sous("models", cmd_models, "modèles sans pièce / payants"); s.add_argument("--pont", action="store_true")
+    s = sous("quickstart", cmd_quickstart, "tout enchaîner : login, service, état, configuration d'un client")
+    s.add_argument("--cookie-fichier"); s.add_argument("--sans-verification", action="store_true"); s.add_argument("--dry-run", action="store_true")
+    s.add_argument("--harnais", default="openai", help="client à configurer à la fin (défaut : openai)")
+    s.add_argument("--modele", default="qwen-3-8-27b"); s.add_argument("--appliquer", action="store_true")
+    s = sous("run", cmd_run, "lancer le pont au premier plan (sans systemd : macOS, Windows, essai)"); s.add_argument("--dry-run", action="store_true")
     s = sous("install", cmd_install, "installer le pont comme service utilisateur systemd"); s.add_argument("--dry-run", action="store_true")
     s = sous("uninstall", cmd_uninstall, "retirer le service"); s.add_argument("--purger", action="store_true"); s.add_argument("--dry-run", action="store_true")
     s = sous("harness", cmd_harness, "configuration pour un client")
@@ -399,6 +446,8 @@ def construire_parseur() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     a = construire_parseur().parse_args(argv)
     try:
+        if sys.version_info < (3, 9):
+            raise Erreur("Python 3.9 ou plus requis.")
         return a.f(a)
     except Erreur as e:
         print(f"Erreur : {e}", file=sys.stderr)

@@ -68,7 +68,7 @@ def concurrence(modele):
     for n in (2, 4, 8, 16):
         sorties = [None] * n
 
-        def tache(i):
+        def tache(i, sorties=sorties):
             sorties[i] = appeler(modele, "Réponds seulement : ok", 8)
         fils = [threading.Thread(target=tache, args=(i,)) for i in range(n)]
         [f.start() for f in fils]

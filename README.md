@@ -1,5 +1,7 @@
 # venice-setup
 
+[![CI](https://github.com/xairon/ve_nice-proxy/actions/workflows/ci.yml/badge.svg)](https://github.com/xairon/ve_nice-proxy/actions/workflows/ci.yml) ![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue) ![Licence MIT](https://img.shields.io/badge/licence-MIT-green) ![Dépendances 0](https://img.shields.io/badge/dépendances-0-brightgreen)
+
 Brancher un compte **Venice** (abonnement Pro) sur vos outils d'IA — OpenCode, Hermes, Codex CLI, Claude Code, Open WebUI, OmniRoute, tout client « OpenAI-compatible » — par un petit pont local, en utilisant les modèles « sans pièce » (illimités avec Pro).
 
 > ## ⚠️ À lire avant tout : conditions d'utilisation de Venice
@@ -59,22 +61,33 @@ Deux chemins existent côté Venice, que le pont choisit selon le modèle :
 
 ## Prérequis
 
-- Linux avec **systemd utilisateur** (pour le service ; le pont tourne aussi à la main sans systemd).
-- **Python 3.9 ou plus** et le module `requests` (`pip install --user requests`).
+- **Python 3.9 ou plus**, **aucune dépendance** (bibliothèque standard seule).
+- Pour tourner en service : Linux avec **systemd utilisateur**, ou **Docker** (`docker-compose.yml`). Ailleurs (macOS, Windows, essai rapide) : `python3 venice-setup run` au premier plan.
 - Un **compte Venice Pro** et son cookie `__client` ([docs/COOKIE.md](docs/COOKIE.md)).
 - Facultatif : OmniRoute (passerelle de modèles) pour Hermes, Open WebUI, Codex CLI, Claude Code.
 
-## Démarrage rapide (5 commandes)
+## Démarrage rapide
 
 ```bash
 git clone https://github.com/xairon/ve_nice-proxy && cd ve_nice-proxy
-./venice-setup login                         # guide + saisie masquée du cookie __client, validation, écriture en 600
-./venice-setup install                       # service utilisateur systemd (--dry-run pour voir sans rien faire)
-./venice-setup status                        # santé du pont, cookie, crédits
-./venice-setup harness opencode --appliquer  # ajoute le fournisseur dans opencode.json (sauvegarde .bak-*)
+python3 venice-setup quickstart      # login (cookie en saisie masquée) > service > état > configuration d'un client
 ```
 
-Puis, pour un client OpenAI quelconque : `./venice-setup harness openai`. Un exemple complet, avec les réponses attendues, est dans [docs/EXEMPLE.md](docs/EXEMPLE.md).
+`quickstart` enchaîne les quatre étapes (il accepte `--cookie-fichier`, `--dry-run`, `--harnais opencode --appliquer`). Étape par étape :
+
+```bash
+python3 venice-setup login                          # guide + saisie masquée du cookie __client, validation, écriture en 600
+python3 venice-setup install                        # service systemd utilisateur (--dry-run pour voir sans rien faire)
+python3 venice-setup run                            # ... ou : pont au premier plan, sans systemd (macOS, Windows, essai)
+python3 venice-setup status                         # santé du pont, cookie, crédits
+python3 venice-setup harness opencode --appliquer   # ajoute le fournisseur dans opencode.json (sauvegarde .bak-*)
+```
+
+**Docker** (après `login`) : `docker compose up -d --build`, puis `curl -s http://127.0.0.1:8700/health`. Le conteneur ne publie que sur `127.0.0.1`.
+
+**Sans OmniRoute** : le pont suffit à OpenCode, aider, Continue, Cline, curl et tout client OpenAI-compatible. OmniRoute n'est utile que pour Codex CLI et Claude Code (API Responses et Messages) ou pour des alias et des clés par client.
+
+Windows : le pont est en Python standard et la CI l'essaie, mais l'auteur n'a pas de machine Windows ; `python venice-setup run` au premier plan est le chemin à tenter, un retour est le bienvenu.
 
 ## Documentation
 
@@ -115,7 +128,7 @@ Génération vidéo ou musique, édition d'image, audio ou vidéo en entrée d'u
 ## Arborescence
 
 ```
-venice-setup          CLI (Python, bibliothèque standard + requests pour le pont)
+venice-setup          CLI (Python, bibliothèque standard seule)
 pont/                 le pont (venice_pont.py), ses tests, ROUTES.md, bancs de mesure
 gabarits/             unité systemd, env.example, gabarits OmniRoute
 docs/                 la documentation

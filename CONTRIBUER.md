@@ -1,6 +1,6 @@
 # Contribuer
 
-Merci de votre intérêt. Le projet est petit et volontairement sans dépendance (bibliothèque standard pour le CLI, `requests` pour le pont).
+Merci de votre intérêt. Le projet est petit et volontairement sans dépendance (bibliothèque standard seule, CLI et pont).
 
 ## Règles
 
@@ -14,7 +14,7 @@ Merci de votre intérêt. Le projet est petit et volontairement sans dépendance
 ## Mettre en place l'environnement de test
 
 ```bash
-python3 -m venv .venv && .venv/bin/pip install pytest requests
+python3 -m venv .venv && .venv/bin/pip install pytest ruff
 .venv/bin/python -m pytest tests pont/tests -q
 ```
 

@@ -11,6 +11,7 @@ import argparse
 import getpass
 import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -42,7 +43,14 @@ def lire_profils() -> dict:
     return json.loads(f.read_text()) if f.exists() else {}
 
 
-def profil(nom: str, creer: bool = False) -> dict:
+def verifier_nom(nom: str) -> None:
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,31}", nom):
+        raise Erreur(f"Nom de profil invalide : '{nom}' (minuscules, chiffres, - et _ ; 32 caractères au plus).")
+
+
+def profil(nom: str, creer: bool = False, enregistrer: bool = True) -> dict:
+    """Le profil `nom`. `creer` en alloue un (port suivant) ; `enregistrer=False` le calcule sans rien écrire (dry-run)."""
+    verifier_nom(nom)
     profils = lire_profils()
     if nom not in profils:
         if not creer:
@@ -52,7 +60,8 @@ def profil(nom: str, creer: bool = False) -> dict:
         while port in pris:
             port += 1
         profils[nom] = {"port": port, "hote": HOTE_DEFAUT}
-        ecrire_prive(fichier_profils(), json.dumps(profils, indent=2) + "\n")
+        if enregistrer:
+            ecrire_prive(fichier_profils(), json.dumps(profils, indent=2) + "\n")
     p = profils[nom]
     d = RACINE / nom
     return {**p, "nom": nom, "dossier": d, "env": d / "venice.env", "credits": d / "credits.json",
@@ -60,8 +69,9 @@ def profil(nom: str, creer: bool = False) -> dict:
 
 
 def ecrire_prive(chemin: Path, texte: str) -> None:
-    """Écrit en 600 (créé en 600 d'emblée, jamais lisible par d'autres même un instant)."""
+    """Écrit en 600 (créé en 600 d'emblée, jamais lisible par d'autres même un instant) dans un dossier en 700."""
     chemin.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(chemin.parent, 0o700)
     tmp = chemin.with_name(chemin.name + ".tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
@@ -96,25 +106,32 @@ GUIDE_COOKIE = """Récupérer le cookie __client (une seule fois, valable enviro
 Ne la partagez jamais : elle donne accès à votre compte."""
 
 
-def valider_cookie(cookie: str) -> dict:
-    """Mint Clerk puis lecture du solde ; renvoie {'solde': float|None}. Aucun appel payant."""
+def valider_cookie(cookie: str, session_factory=None) -> dict:
+    """Mint Clerk puis lecture du solde ; renvoie {'solde': float|None, 'cookie': str}. Aucun appel payant.
+
+    Clerk peut renvoyer un `__client` renouvelé pendant la validation : c'est lui qu'il faut enregistrer, l'ancien
+    ne servirait plus au prochain démarrage. La validation travaille dans un dossier jetable, jamais dans le profil."""
+    import tempfile
     import venice_pont as vp
-    source = vp.SourceClerk(cookie, os.devnull)
-    jeton = vp.JetonClerk(source.mint)
-    try:
-        jeton.obtenir()
-    except vp.CookieExpire as e:
-        raise Erreur(f"Cookie refusé par Clerk : {e}. Reconnectez-vous sur venice.ai et recopiez __client.")
-    try:
-        solde = vp.lire_solde(jeton)
-    except Exception as e:  # le solde est un confort : sans lui le pont fonctionne quand même
-        print(f"  (solde illisible : {e})", file=sys.stderr)
-        solde = None
-    return {"solde": solde}
+    with tempfile.TemporaryDirectory() as tmp:
+        env = Path(tmp) / "venice.env"
+        ecrire_prive(env, f"VENICE_CLERK_CLIENT={cookie}\n")
+        source = vp.SourceClerk(cookie, str(env), session_factory=session_factory)
+        jeton = vp.JetonClerk(source.mint)
+        try:
+            jeton.obtenir()
+        except vp.CookieExpire as e:
+            raise Erreur(f"Cookie refusé par Clerk : {e}. Reconnectez-vous sur venice.ai et recopiez __client.")
+        try:
+            solde = vp.lire_solde(jeton)
+        except Exception as e:  # le solde est un confort : sans lui le pont fonctionne quand même
+            print(f"  (solde illisible : {e})", file=sys.stderr)
+            solde = None
+        return {"solde": solde, "cookie": source.cookie}
 
 
 def cmd_login(a) -> int:
-    p = profil(a.profil, creer=True)
+    verifier_nom(a.profil)
     if a.cookie_fichier:
         cookie = Path(a.cookie_fichier).expanduser().read_text().strip()
     else:
@@ -124,7 +141,9 @@ def cmd_login(a) -> int:
         raise Erreur("Ce cookie semble trop court : recopiez la valeur complète de __client.")
     if not a.sans_verification:
         res = valider_cookie(cookie)
+        cookie = res["cookie"]
         print(f"Cookie valide. Solde de crédits : {res['solde'] if res['solde'] is not None else 'inconnu'}.")
+    p = profil(a.profil, creer=True, enregistrer=not a.dry_run)  # après la validation : un refus ne laisse aucun profil
     existant = lire_env(p["env"]) if p["env"].exists() else {}
     cle = existant.get("VENICE_PONT_CLE") or secrets.token_urlsafe(32)
     texte = (f"VENICE_CLERK_CLIENT={cookie}\nVENICE_PONT_CLE={cle}\n")
@@ -233,16 +252,21 @@ def cmd_install(a) -> int:
 def cmd_uninstall(a) -> int:
     p = profil(a.profil)
     cible = dossier_unites() / f"{p['service']}.service"
-    systemctl("disable", "--now", p["service"], simule=a.dry_run)
     if cible.exists():
+        systemctl("disable", "--now", p["service"], simule=a.dry_run)
         print(f"{'[dry-run] supprimerait' if a.dry_run else 'Supprimé'} : {cible}")
         if not a.dry_run:
             cible.unlink()
-    systemctl("daemon-reload", simule=a.dry_run)
+        systemctl("daemon-reload", simule=a.dry_run)
+    else:
+        print(f"Aucune unité installée pour '{a.profil}'.")
     if a.purger:
         print(f"{'[dry-run] supprimerait' if a.dry_run else 'Supprimé'} : {p['dossier']} (cookie et clé du pont)")
         if not a.dry_run:
-            shutil.rmtree(p["dossier"])
+            shutil.rmtree(p["dossier"], ignore_errors=True)
+            profils = lire_profils()
+            profils.pop(a.profil, None)
+            ecrire_prive(fichier_profils(), json.dumps(profils, indent=2) + "\n")
     else:
         print(f"Secrets conservés dans {p['dossier']} (--purger pour les effacer).")
     return 0
@@ -286,13 +310,13 @@ HARNAIS = {
     "opencode": ("TESTÉ (bout en bout, kimi-k2-5 : création de fichier + tests)", None),
     "openai": ("TESTÉ (curl chat completions)", None),
     "omniroute": ("TESTÉ (fournisseur custom + alias, v3.8.52)", None),
-    "hermes": ("TESTÉ (Hermes Agent, fournisseur personnalisé)", None),
-    "aider": ("NON TESTÉ", None),
+    "hermes": ("TESTÉ via OmniRoute (fournisseur omniroute-ven) ; branchement direct sur le pont : format conforme à Hermes v0.22, non lancé", None),
+    "openwebui": ("TESTÉ via OmniRoute (Open WebUI v0.11.4, connexion OpenAI) ; branchement direct sur le pont : même réglage, non lancé", None),
+    "aider": ("NON TESTÉ (installation impossible ici : Python 3.13, dépendances sans roue)", None),
     "cline": ("NON TESTÉ", None),
     "continue": ("NON TESTÉ", None),
-    "openwebui": ("NON TESTÉ", None),
-    "codex": ("NON TESTÉ, probablement incompatible : Codex CLI exige l'API Responses (wire_api = \"responses\"), le pont ne parle que /v1/chat/completions", None),
-    "claude-code": ("NON TESTÉ : Claude Code parle l'API Anthropic ; il faut un routeur (claude-code-router, projet musistudio) devant le pont", None),
+    "codex": ("TESTÉ via OmniRoute uniquement (/v1/responses traduit vers Venice, ven-kimi) ; Codex CLI ne peut pas parler au pont seul, qui n'expose pas /v1/responses", None),
+    "claude-code": ("TESTÉ via OmniRoute uniquement (/v1/messages traduit vers Venice, ven-kimi, 'pong') ; claude-code-router : non testé", None),
 }
 
 
@@ -322,19 +346,23 @@ providers:
     key_env: VENICE_PONT_CLE
     model: {m}""")
     elif n == "codex":
-        print(f"""# ~/.codex/config.toml (NON TESTÉ ; échouera si le pont n'expose pas /v1/responses)
-model_provider = "venice"
+        print(f"""# ~/.codex/config.toml : Codex CLI exige l'API Responses, que seul OmniRoute (pas le pont) expose.
+# {m} doit être un alias d'OmniRoute ouvert à votre clé (exemple : ven-kimi).
+model_provider = "omniroute"
 model = "{m}"
-[model_providers.venice]
-name = "Venice (pont local)"
-base_url = "{u}"
-env_key = "VENICE_PONT_CLE"
+[model_providers.omniroute]
+name = "OmniRoute"
+base_url = "http://127.0.0.1:20128/v1"
+env_key = "OMNIROUTE_CLE"
 wire_api = "responses\"""")
     elif n == "claude-code":
-        print(f"""# claude-code-router (NON TESTÉ) : https://github.com/musistudio/claude-code-router
-# Le fournisseur pointe sur l'URL de chat completions complète du pont :
-#   api_base_url = {u}/chat/completions ; models = [{m}]
-# Puis lancer Claude Code à travers le routeur (voir la documentation du projet pour la version installée).""")
+        print(f"""# Claude Code parle l'API Anthropic ; OmniRoute l'expose (/v1/messages) et la traduit vers Venice.
+# {m} doit être un alias d'OmniRoute ouvert à votre clé. Prendre un alias à grande fenêtre (ven-kimi, 262 144) :
+# sur ven-qwen-nc (~39k utiles) le prompt de Claude Code est tronqué et les réponses sont hors sujet.
+export ANTHROPIC_BASE_URL=http://127.0.0.1:20128
+export ANTHROPIC_API_KEY="$OMNIROUTE_CLE"
+claude --model {m}
+# Alternative sans OmniRoute : claude-code-router (https://github.com/musistudio/claude-code-router), non testé.""")
     else:
         print(f"URL de base : {u}\nClé API : VENICE_PONT_CLE\nModèle : {m}\n# Réglage générique « OpenAI-compatible » de {n}.")
     return 0

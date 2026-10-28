@@ -1,0 +1,7 @@
+# Nœud openai-compatible pointant sur le pont. Le préfixe « venice » est réservé par OmniRoute : utiliser autre chose (ex. `ven`).
+fournisseurs:
+  ven:
+    type: openai-compatible
+    prefixe: ven
+    base_url: http://<HOTE_DU_PONT>:8700/v1
+    cle_fichier: ~/.config/venice-setup/defaut/pont-cle   # contient la valeur de VENICE_PONT_CLE

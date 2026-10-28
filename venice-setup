@@ -1,0 +1,381 @@
+#!/usr/bin/env python3
+"""venice-setup : brancher un compte Venice (abonnement Pro) sur vos outils d'IA, par un pont OpenAI-compatible local.
+
+Sous-commandes : login, status, models, install, uninstall, harness, profils.
+Chaque commande qui écrit accepte --dry-run. Aucun secret n'est jamais affiché ni écrit hors d'un fichier en mode 600.
+AVERTISSEMENT : les CGU de Venice interdisent l'usage programmatique du compte web. Voir README.md.
+"""
+from __future__ import annotations
+
+import argparse
+import getpass
+import json
+import os
+import secrets
+import shutil
+import subprocess
+import sys
+import time
+import urllib.request
+from pathlib import Path
+
+ICI = Path(__file__).resolve().parent
+sys.path.insert(0, str(ICI / "pont"))
+
+RACINE = Path(os.environ.get("VENICE_SETUP_HOME", "~/.config/venice-setup")).expanduser()
+PORT_DE_BASE = 8700
+HOTE_DEFAUT = "127.0.0.1"
+
+
+class Erreur(Exception):
+    """Erreur attendue : message pour l'utilisateur, code 2."""
+
+
+# --- profils (un compte = un profil = un pont) -------------------------------------------------------------
+
+def fichier_profils() -> Path:
+    return RACINE / "profils.json"
+
+
+def lire_profils() -> dict:
+    f = fichier_profils()
+    return json.loads(f.read_text()) if f.exists() else {}
+
+
+def profil(nom: str, creer: bool = False) -> dict:
+    profils = lire_profils()
+    if nom not in profils:
+        if not creer:
+            raise Erreur(f"Profil '{nom}' inconnu. Lancez d'abord : venice-setup login --profil {nom}")
+        pris = {p["port"] for p in profils.values()}
+        port = PORT_DE_BASE
+        while port in pris:
+            port += 1
+        profils[nom] = {"port": port, "hote": HOTE_DEFAUT}
+        ecrire_prive(fichier_profils(), json.dumps(profils, indent=2) + "\n")
+    p = profils[nom]
+    d = RACINE / nom
+    return {**p, "nom": nom, "dossier": d, "env": d / "venice.env", "credits": d / "credits.json",
+            "service": "venice-pont" if nom == "defaut" else f"venice-pont-{nom}"}
+
+
+def ecrire_prive(chemin: Path, texte: str) -> None:
+    """Écrit en 600 (créé en 600 d'emblée, jamais lisible par d'autres même un instant)."""
+    chemin.parent.mkdir(parents=True, exist_ok=True)
+    tmp = chemin.with_name(chemin.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(texte)
+    os.replace(tmp, chemin)
+
+
+def lire_env(chemin: Path) -> dict:
+    sortie = {}
+    for ligne in chemin.read_text().splitlines():
+        if "=" in ligne and not ligne.lstrip().startswith("#"):
+            k, v = ligne.split("=", 1)
+            sortie[k.strip()] = v.strip()
+    return sortie
+
+
+def sauvegarder(chemin: Path) -> Path | None:
+    if not chemin.exists():
+        return None
+    copie = chemin.with_name(f"{chemin.name}.bak-{time.strftime('%Y%m%d-%H%M%S')}")
+    shutil.copy2(chemin, copie)
+    return copie
+
+
+# --- login ---------------------------------------------------------------------------------------------------
+
+GUIDE_COOKIE = """Récupérer le cookie __client (une seule fois, valable environ un an) :
+  1. Connectez-vous sur https://venice.ai avec le compte à brancher.
+  2. Ouvrez les outils de développement du navigateur (F12) > onglet Application (Chrome) ou Stockage (Firefox) > Cookies > https://venice.ai.
+  3. Copiez la VALEUR du cookie nommé __client (une longue chaîne commençant par eyJ...).
+  4. Collez-la ci-dessous (saisie masquée), ou mettez-la seule dans un fichier et passez --cookie-fichier.
+Ne la partagez jamais : elle donne accès à votre compte."""
+
+
+def valider_cookie(cookie: str) -> dict:
+    """Mint Clerk puis lecture du solde ; renvoie {'solde': float|None}. Aucun appel payant."""
+    import venice_pont as vp
+    source = vp.SourceClerk(cookie, os.devnull)
+    jeton = vp.JetonClerk(source.mint)
+    try:
+        jeton.obtenir()
+    except vp.CookieExpire as e:
+        raise Erreur(f"Cookie refusé par Clerk : {e}. Reconnectez-vous sur venice.ai et recopiez __client.")
+    try:
+        solde = vp.lire_solde(jeton)
+    except Exception as e:  # le solde est un confort : sans lui le pont fonctionne quand même
+        print(f"  (solde illisible : {e})", file=sys.stderr)
+        solde = None
+    return {"solde": solde}
+
+
+def cmd_login(a) -> int:
+    p = profil(a.profil, creer=True)
+    if a.cookie_fichier:
+        cookie = Path(a.cookie_fichier).expanduser().read_text().strip()
+    else:
+        print(GUIDE_COOKIE)
+        cookie = getpass.getpass("Cookie __client : ").strip()
+    if len(cookie) < 40:
+        raise Erreur("Ce cookie semble trop court : recopiez la valeur complète de __client.")
+    if not a.sans_verification:
+        res = valider_cookie(cookie)
+        print(f"Cookie valide. Solde de crédits : {res['solde'] if res['solde'] is not None else 'inconnu'}.")
+    existant = lire_env(p["env"]) if p["env"].exists() else {}
+    cle = existant.get("VENICE_PONT_CLE") or secrets.token_urlsafe(32)
+    texte = (f"VENICE_CLERK_CLIENT={cookie}\nVENICE_PONT_CLE={cle}\n")
+    if a.dry_run:
+        print(f"[dry-run] écrirait {p['env']} (600) avec VENICE_CLERK_CLIENT et VENICE_PONT_CLE ({'conservée' if existant else 'générée'}).")
+        return 0
+    sauvegarder(p["env"])
+    ecrire_prive(p["env"], texte)
+    print(f"Écrit : {p['env']} (600). Profil '{a.profil}', port {p['port']}. Étape suivante : venice-setup install --profil {a.profil}")
+    return 0
+
+
+# --- status / models -----------------------------------------------------------------------------------------
+
+def appel(p: dict, chemin: str, delai: float = 8) -> dict:
+    cle = lire_env(p["env"])["VENICE_PONT_CLE"]
+    req = urllib.request.Request(f"http://{p['hote']}:{p['port']}{chemin}", headers={"Authorization": f"Bearer {cle}"})
+    with urllib.request.urlopen(req, timeout=delai) as r:
+        return json.load(r)
+
+
+def cmd_status(a) -> int:
+    p = profil(a.profil)
+    try:
+        h = appel(p, "/health")
+    except Exception as e:
+        print(f"Pont injoignable sur {p['hote']}:{p['port']} ({e}). venice-setup install --profil {a.profil} ?")
+        return 1
+    c = h.get("credits") or {}
+    print(f"Pont {a.profil} : {'OK' if h.get('ok') else 'PROBLÈME'} ({p['hote']}:{p['port']})")
+    print(f"  cookie : {'valide' if h.get('cookie_ok') else 'MORT (reconnectez-vous sur venice.ai puis venice-setup login)'}"
+          f", expire dans {h.get('cookie_jours_restants', '?')} jours")
+    print(f"  crédits : {c.get('courant')} (référence {c.get('reference')}), débit détecté : {'OUI' if c.get('alerte') else 'non'}")
+    return 0 if h.get("ok") and not c.get("alerte") else 1
+
+
+def cmd_models(a) -> int:
+    import venice_pont as vp
+    gratuits = sorted(vp.GRATUITS)
+    print("Sans pièce (illimités avec Pro, autorisés par le pont) :")
+    for m in gratuits:
+        print(f"  {m}" + ("   [route agents, contexte 262k à 524k]" if vp.est_agent(m) else "   [chat classique, contexte utile ~39k]"))
+    print("\nAvec pièces (DÉBITÉS, refusés par le pont sauf VENICE_PONT_AUTORISER_PAYANTS=1 ou autoriser_debit:true) :")
+    print("  GLM 5.2 / 5.3 Flash, Kimi K2.7 Code, DeepSeek V4.1 Flash (chat), Aion 3.5, Qwen 3.6 Plus, Grok 4.6, Claude Fable 5.1...")
+    print("\nLa liste « sans pièce » est relevée à la main dans le sélecteur de venice.ai (bench du 28/10/2026) : elle change.")
+    if a.pont:
+        try:
+            ids = [m["id"] for m in appel(profil(a.profil), "/v1/models")["data"]]
+            print("\nCe que sert votre pont :", ", ".join(ids))
+        except Exception as e:
+            print(f"\nPont injoignable ({e}).")
+    return 0
+
+
+# --- install / uninstall -------------------------------------------------------------------------------------
+
+def unite(p: dict, chemin_pont: Path) -> str:
+    modele = (ICI / "gabarits" / "venice-pont.service.in").read_text()
+    return (modele.replace("@@PYTHON@@", sys.executable).replace("@@PONT@@", str(chemin_pont))
+            .replace("@@ENV@@", str(p["env"])).replace("@@ECOUTE@@", f"{p['hote']}:{p['port']}")
+            .replace("@@CREDITS@@", str(p["credits"])).replace("@@NOM@@", p["nom"]))
+
+
+def dossier_unites() -> Path:
+    return Path(os.environ.get("VENICE_SETUP_SYSTEMD", "~/.config/systemd/user")).expanduser()
+
+
+def systemctl(*args, simule=False):
+    cmd = ["systemctl", "--user", *args]
+    if simule:
+        print("[dry-run]", " ".join(cmd))
+        return 0
+    return subprocess.run(cmd).returncode
+
+
+def cmd_install(a) -> int:
+    p = profil(a.profil)
+    if not p["env"].exists():
+        raise Erreur(f"Pas de secrets pour '{a.profil}'. Lancez : venice-setup login --profil {a.profil}")
+    if sys.version_info < (3, 9):
+        raise Erreur("Python 3.9 ou plus requis.")
+    try:
+        import requests  # noqa: F401
+    except ImportError:
+        raise Erreur("Le module Python 'requests' manque (le pont l'utilise pour parler à Venice) : pip install --user requests")
+    chemin_pont = ICI / "pont" / "venice_pont.py"
+    texte = unite(p, chemin_pont)
+    cible = dossier_unites() / f"{p['service']}.service"
+    if cible.exists() and cible.read_text() == texte:
+        print(f"Unité déjà à jour : {cible}")
+    elif a.dry_run:
+        print(f"[dry-run] écrirait {cible} :\n{texte}")
+    else:
+        sauvegarder(cible)
+        cible.parent.mkdir(parents=True, exist_ok=True)
+        cible.write_text(texte)
+        print(f"Unité écrite : {cible}")
+    systemctl("daemon-reload", simule=a.dry_run)
+    systemctl("enable", "--now", p["service"], simule=a.dry_run)
+    if not a.dry_run:
+        time.sleep(2)
+        return cmd_status(a)
+    return 0
+
+
+def cmd_uninstall(a) -> int:
+    p = profil(a.profil)
+    cible = dossier_unites() / f"{p['service']}.service"
+    systemctl("disable", "--now", p["service"], simule=a.dry_run)
+    if cible.exists():
+        print(f"{'[dry-run] supprimerait' if a.dry_run else 'Supprimé'} : {cible}")
+        if not a.dry_run:
+            cible.unlink()
+    systemctl("daemon-reload", simule=a.dry_run)
+    if a.purger:
+        print(f"{'[dry-run] supprimerait' if a.dry_run else 'Supprimé'} : {p['dossier']} (cookie et clé du pont)")
+        if not a.dry_run:
+            shutil.rmtree(p["dossier"])
+    else:
+        print(f"Secrets conservés dans {p['dossier']} (--purger pour les effacer).")
+    return 0
+
+
+# --- harness -------------------------------------------------------------------------------------------------
+
+def url_pont(p: dict) -> str:
+    return f"http://{p['hote']}:{p['port']}/v1"
+
+
+def gen_opencode(p, modele):
+    return {"$schema": "https://opencode.ai/config.json", "model": f"venice-direct/{modele}",
+            "provider": {"venice-direct": {"npm": "@ai-sdk/openai-compatible", "name": "Venice (pont local)",
+                         "options": {"baseURL": url_pont(p), "apiKey": "{env:VENICE_PONT_CLE}"},
+                         "models": {m: {"name": m, "tool_call": True, "limit": {"context": 38000, "output": 8192}}
+                                    for m in ("kimi-k2-5", "qwen-3-8-27b", "deepseek-v4-1-flash-uncensored")}}}}
+
+
+def appliquer_opencode(p, modele, dry):
+    chemin = Path(os.environ.get("VENICE_SETUP_OPENCODE", "~/.config/opencode/opencode.json")).expanduser()
+    # opencode.jsonc (avec commentaires) n'est pas fusionnable sans analyseur : on refuse plutôt que de l'abîmer.
+    if chemin.with_suffix(".jsonc").exists() and not chemin.exists():
+        raise Erreur(f"{chemin.with_suffix('.jsonc')} existe (JSON avec commentaires) : fusionnez à la main le bloc affiché par "
+                     "`venice-setup harness opencode` (sans --appliquer).")
+    cfg = json.loads(chemin.read_text()) if chemin.exists() else {}
+    neuf = gen_opencode(p, modele)
+    cfg.setdefault("provider", {})["venice-direct"] = neuf["provider"]["venice-direct"]
+    cfg.setdefault("$schema", neuf["$schema"])
+    if dry:
+        print(f"[dry-run] fusionnerait le fournisseur venice-direct dans {chemin}")
+        return
+    bak = sauvegarder(chemin)
+    chemin.parent.mkdir(parents=True, exist_ok=True)
+    chemin.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n")
+    print(f"OpenCode : fournisseur venice-direct ajouté dans {chemin}" + (f" (sauvegarde {bak})" if bak else ""))
+    print("  Exportez VENICE_PONT_CLE (valeur dans le fichier de secrets) ou remplacez {env:VENICE_PONT_CLE} par {file:...}.")
+
+
+HARNAIS = {
+    "opencode": ("TESTÉ (bout en bout, kimi-k2-5 : création de fichier + tests)", None),
+    "openai": ("TESTÉ (curl chat completions)", None),
+    "omniroute": ("TESTÉ (fournisseur custom + alias, v3.8.52)", None),
+    "hermes": ("TESTÉ (Hermes Agent, fournisseur personnalisé)", None),
+    "aider": ("NON TESTÉ", None),
+    "cline": ("NON TESTÉ", None),
+    "continue": ("NON TESTÉ", None),
+    "openwebui": ("NON TESTÉ", None),
+    "codex": ("NON TESTÉ, probablement incompatible : Codex CLI exige l'API Responses (wire_api = \"responses\"), le pont ne parle que /v1/chat/completions", None),
+    "claude-code": ("NON TESTÉ : Claude Code parle l'API Anthropic ; il faut un routeur (claude-code-router, projet musistudio) devant le pont", None),
+}
+
+
+def cmd_harness(a) -> int:
+    p = profil(a.profil)
+    n = a.nom
+    if n not in HARNAIS:
+        raise Erreur(f"Harnais inconnu. Disponibles : {', '.join(HARNAIS)}")
+    print(f"# {n} : {HARNAIS[n][0]}\n# Pont : {url_pont(p)}  (clé : VENICE_PONT_CLE dans {p['env']})")
+    u, m = url_pont(p), a.modele
+    if n == "opencode":
+        if a.appliquer:
+            appliquer_opencode(p, m, a.dry_run)
+        else:
+            print(json.dumps(gen_opencode(p, m), indent=2, ensure_ascii=False))
+    elif n == "openai":
+        print(f"export OPENAI_BASE_URL={u}\nexport OPENAI_API_KEY=\"$(grep ^VENICE_PONT_CLE= {p['env']} | cut -d= -f2-)\"\n# modèle : {m}")
+    elif n == "omniroute":
+        print(f"Fournisseur openai-compatible : base_url {u}, clé = VENICE_PONT_CLE ; modèles (alias) : {m}.\n"
+              f"Gabarits : {ICI}/gabarits/omniroute/*.exemple.yaml. Coupez le masqueur de secrets en 3.8.52 (README, bugs connus).")
+    elif n == "hermes":
+        print(f"""# ~/.hermes/config.yaml
+providers:
+  venice:
+    name: Venice (pont local)
+    base_url: {u}
+    key_env: VENICE_PONT_CLE
+    model: {m}""")
+    elif n == "codex":
+        print(f"""# ~/.codex/config.toml (NON TESTÉ ; échouera si le pont n'expose pas /v1/responses)
+model_provider = "venice"
+model = "{m}"
+[model_providers.venice]
+name = "Venice (pont local)"
+base_url = "{u}"
+env_key = "VENICE_PONT_CLE"
+wire_api = "responses\"""")
+    elif n == "claude-code":
+        print(f"""# claude-code-router (NON TESTÉ) : https://github.com/musistudio/claude-code-router
+# Le fournisseur pointe sur l'URL de chat completions complète du pont :
+#   api_base_url = {u}/chat/completions ; models = [{m}]
+# Puis lancer Claude Code à travers le routeur (voir la documentation du projet pour la version installée).""")
+    else:
+        print(f"URL de base : {u}\nClé API : VENICE_PONT_CLE\nModèle : {m}\n# Réglage générique « OpenAI-compatible » de {n}.")
+    return 0
+
+
+def cmd_profils(a) -> int:
+    for nom, p in lire_profils().items():
+        print(f"{nom}\t{p['hote']}:{p['port']}")
+    return 0
+
+
+def construire_parseur() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(prog="venice-setup", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sp = ap.add_subparsers(dest="cmd", required=True)
+
+    def sous(nom, f, aide):
+        s = sp.add_parser(nom, help=aide)
+        s.add_argument("--profil", default="defaut", help="un profil = un compte Venice = un pont (défaut : defaut)")
+        s.set_defaults(f=f)
+        return s
+
+    s = sous("login", cmd_login, "enregistrer le cookie __client d'un compte")
+    s.add_argument("--cookie-fichier"); s.add_argument("--sans-verification", action="store_true"); s.add_argument("--dry-run", action="store_true")
+    sous("status", cmd_status, "santé du pont, cookie, crédits")
+    s = sous("models", cmd_models, "modèles sans pièce / payants"); s.add_argument("--pont", action="store_true")
+    s = sous("install", cmd_install, "installer le pont comme service utilisateur systemd"); s.add_argument("--dry-run", action="store_true")
+    s = sous("uninstall", cmd_uninstall, "retirer le service"); s.add_argument("--purger", action="store_true"); s.add_argument("--dry-run", action="store_true")
+    s = sous("harness", cmd_harness, "configuration pour un client")
+    s.add_argument("nom"); s.add_argument("--modele", default="kimi-k2-5"); s.add_argument("--appliquer", action="store_true"); s.add_argument("--dry-run", action="store_true")
+    sous("profils", cmd_profils, "lister les profils")
+    return ap
+
+
+def main(argv=None) -> int:
+    a = construire_parseur().parse_args(argv)
+    try:
+        return a.f(a)
+    except Erreur as e:
+        print(f"Erreur : {e}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

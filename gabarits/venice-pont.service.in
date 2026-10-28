@@ -1,0 +1,16 @@
+[Unit]
+Description=Pont OpenAI vers Venice (@@NOM@@)
+After=network-online.target
+
+[Service]
+ExecStart=@@PYTHON@@ @@PONT@@
+Environment=VENICE_PONT_ENV=@@ENV@@
+Environment=VENICE_PONT_ECOUTE=@@ECOUTE@@
+Environment=VENICE_PONT_CREDITS=@@CREDITS@@
+Restart=on-failure
+RestartSec=10
+MemoryMax=256M
+Nice=10
+
+[Install]
+WantedBy=default.target

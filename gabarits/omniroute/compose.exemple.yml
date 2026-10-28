@@ -1,0 +1,7 @@
+# OmniRoute 3.8.52 : bogue du masqueur de secrets (arguments d'outil dupliqués en flux, corrigé en 3.8.53).
+# La variable seule ne suffit pas (le code fait « réglage en base OU variable ») : couper aussi le réglage en base,
+#   PATCH /api/settings {"credentialRedactionEnabled": false}
+services:
+  omniroute:
+    environment:
+      CREDENTIAL_REDACTION_ENABLED: "false"

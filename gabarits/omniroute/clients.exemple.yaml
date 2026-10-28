@@ -1,0 +1,3 @@
+# 20 requêtes/minute au plus par client : un agent en boucle ne doit pas donner au compte un motif régulier de robot.
+clients:
+  mon-client: {limites: {par_minute: 20}, connexions: [ven], alias: [ven-chat, ven-qwen-nc, ven-kimi, ven-deepseek-nc]}

@@ -1,0 +1,6 @@
+# Alias sans pièce uniquement. Ne mettez PAS de modèle à pièces ici : le pont les refuse (403).
+alias:
+  ven-qwen-nc: {description: "Qwen 3.8 27B non censuré (Pro)", repli: interdit, cibles: [ven/qwen-3-8-27b]}
+  ven-kimi: {description: "Kimi K2.5 (route agents)", repli: interdit, cibles: [ven/kimi-k2-5]}
+  ven-deepseek-nc: {description: "DeepSeek V4.1 Flash non censuré (route agents)", repli: interdit, cibles: [ven/deepseek-v4-1-flash-uncensored]}
+  ven-chat: {description: "Venice Uncensored 1.2", repli: interdit, cibles: [ven/venice-uncensored-1-2]}

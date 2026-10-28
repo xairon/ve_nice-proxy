@@ -89,3 +89,13 @@ Cartographiées sans rien générer : `POST /api/inference/video/quote` (devis),
 ## Lire le solde sans se tromper
 
 Le jeton de `/api/user/session` contient le solde (`veniceCredits`) ; le paramètre `?bustBalanceCache=true` force la relecture (vérifié : même valeur). L'historique de facturation du compte est lisible en lecture seule : `/api/app/user/billing/usage-history` (100 dernières lignes : date, montant, devise, modèle) et `/api/user/api/historical_usage?lookback=7d`.
+
+## Derrière une passerelle OmniRoute (3.8.x)
+
+Mesuré le 28/10/2026 : les routes image, voix et embeddings d'OmniRoute ne reconnaissent pas un modèle d'un nœud « chat » ; le pont passe, mais il faut le déclarer ainsi.
+
+- **Vision** : déclarer les modèles qui lisent une image (`qwen-3-8-27b`, `gemma4-uncensored`) avec `supportsVision: true` (`POST /api/provider-models`), sinon `capability_mismatch` avant tout appel.
+- **Images et édition** : modèles `z-image-turbo` et `qwen-edit-uncensored` du nœud du pont, déclarés avec `supportedEndpoints: ["images"]`.
+- **Voix et embeddings** : un nœud par type d'API (`apiType` `audio-speech`, `embeddings`) pointant sur le même pont et la même clé, avec le modèle déclaré (`tts-kokoro`, `text-embedding-bge-m3`) ; appeler `<préfixe-du-nœud>/<modèle>`.
+- **Voix hors localhost** : `/v1/audio/*` refuse un nœud distant (400 « Invalid speech model ») tant que `AUDIO_REMOTE_PROVIDER_NODES=true` n'est pas posé sur OmniRoute.
+- Les cinq appels (vision, génération, édition, voix, embeddings) ont servi à 0 crédit : solde identique avant et après.

@@ -15,6 +15,17 @@ Venice facture une partie de ses modèles en **crédits** ; d'autres sont **illi
 | `kimi-k2-5` | **agents** | 262 144 | le meilleur pour les agents de code ; ~15k jetons de prompt imposés par Venice ; répond parfois en texte au lieu du JSON d'outil |
 | `deepseek-v4-1-flash-uncensored` | **agents** | 524 288 | très grande fenêtre ; en agent de code il peut se croire limité aux outils de Venice et ne rien écrire (échec mesuré dans OpenCode) |
 
+## Multimodal sans pièce (mesuré le 28/10/2026, solde identique avant et après chaque essai)
+
+| Capacité | Modèles | Détail |
+|---|---|---|
+| Vision (entrée image) | `qwen-3-8-27b`, `qwen3-6-27b`, `qwen3-5-35b-a3b`, `google-gemma-4-26b-a4b-it`, `google-gemma-4-31b-it`, `gemma4-uncensored`, `venice-uncensored-1-2`, `qwen3-vl-235b-a22b` | un dessin (cercle rouge, carré bleu) décrit correctement par chacun ; `venice-uncensored-role-play` répond HTTP 500 avec une image |
+| Génération d'image | `z-image-turbo` (défaut), `chroma`, `stable-diffusion-3.5-rev2`, `lustify-sdxl`, `lustify-v8`, `wai-illu` | seul `z-image-turbo` a été exécuté ; les autres sont `usesCredits: false` dans le catalogue web. 36 autres modèles d'image sont payants (refusés) |
+| Synthèse vocale | `tts-kokoro` (défaut), `tts-qwen3-0-6b`, `tts-qwen3-1-7b`, `tts-xai-v1`, `tts-gemini-3-1-flash`, `tts-elevenlabs-turbo-v2-5`, `tts-minimax-speech-02-hd` (mp3) ; `tts-inworld-1-5-max`, `tts-gradium-v1` (wav seulement) | texte de 15 caractères par modèle. `tts-orpheus` et `tts-chatterbox-hd` n'ont pas répondu en 120 s : exclus |
+| Transcription | `nvidia/parakeet-tdt-0.6b-v3` | multilingue, français correct ; tout nom de modèle envoyé (`whisper-1`…) est remplacé par celui-ci |
+
+Le catalogue web (`/api/app/models`) porte un drapeau `usesCredits` par modèle : c'est la source de la liste ci-dessus (`false` = sans pièce). Les modèles **vidéo** (141) et **musique** (20) sont tous payants.
+
 ## Modèles payants (refusés par le pont : HTTP 403 `modele_payant_refuse`)
 
 GLM 5.2 et 5.3 Flash, Kimi K2.7 Code, DeepSeek V4.1 Flash (version chat), Aion 3.5, Qwen 3.6 Plus Uncensored, Grok 4.6, Claude Fable 5.1, Abliterated Large V2 et Flash… (liste relevée sur le sélecteur du site, incomplète) Mesure : environ 0,0003 $ pour une petite requête et ~0,02 $ à 30-50k jetons sur DeepSeek V4.1 Flash (1 crédit = 0,01 $). Pour en autoriser un malgré tout : requête avec le champ `"autoriser_debit": true`, ou `VENICE_PONT_AUTORISER_PAYANTS=1` (tous). **Déconseillé** : un agent en boucle peut vider le solde. Le garde-fou « solde » ([SECURITE.md](SECURITE.md)) alerte si le solde baisse.

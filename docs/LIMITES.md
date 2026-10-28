@@ -1,13 +1,17 @@
 # Ce qui n'est pas pris en charge
 
-Le pont traduit **du texte** : messages `system` / `user` / `assistant` / `tool`, appels d'outils émulés, flux SSE rejoué. Le reste n'existe pas, par choix (zone grise des CGU, risque de débit) ou par manque de cartographie.
+Le pont traduit le **texte**, les **images** (entrée et sortie), les **fichiers** joints et la **voix** (synthèse et transcription) vers les routes du site. Ce qui suit n'existe pas, par choix (zone grise des CGU, risque de débit) ou par manque de cartographie. Les capacités multimodales sont détaillées dans [MULTIMODAL.md](MULTIMODAL.md).
 
 | Fonction | État | Détail |
 |---|---|---|
-| **Vision** (image en entrée) | **ne marche pas** | Test du 28/10/2026, un essai, 0 crédit : le chat classique (`qwen-3-8-27b`) répond HTTP 400 `Expected string, received array` quand `content` est une liste `[{type: text}, {type: image_url}]` (format OpenAI). Le pont ne garde donc que le texte des messages. Le champ qui porte une image côté site (téléversement préalable ? champ de pièce jointe ?) n'est pas relevé : à explorer par observation du navigateur |
-| Génération d'images | non cartographié | annoncée par Venice (quota quotidien) mais **débite des crédits** ; rien d'essayé |
-| Voix (TTS), transcription (ASR) | non cartographié | rien d'essayé |
-| Téléversement de fichiers / pièces jointes | non cartographié | |
+| Vision (image en entrée) | **fonctionne** | champ `imagePath` du site ; 8 modèles sans pièce ; data URL ou https ; seule la route « chat classique » (pas Kimi ni DeepSeek) |
+| Fichiers joints (PDF, texte) | **fonctionne** | partie `file` du message ; PDF **sans couche texte** (scanné) refusé en 400 : pas d'OCR |
+| Génération d'images | **fonctionne** | `/v1/images/generations`, 6 modèles sans pièce, quota Pro ~1 000/jour ; pas d'image-vers-image ni d'édition (`/v1/images/edits` non exposé) |
+| Synthèse vocale (TTS) | **fonctionne** | `/v1/audio/speech`, 9 modèles, formats mp3 et wav seulement ; pas de flux |
+| Transcription (ASR) | **fonctionne** | `/v1/audio/transcriptions`, un seul modèle (Parakeet) ; **pas d'horodatage** : `srt` et `vtt` refusés, `verbose_json` sans segments ; pas de `language` ni de traduction |
+| Audio ou vidéo en entrée d'un modèle | non | seuls des modèles payants (Gemini…) les lisent ; transcrire d'abord |
+| Vidéo, musique (génération) | **cartographié, non exposé** | 141 modèles vidéo, aucun sans pièce (ex. Wan 2.7, 5 s en 720p : devis de 55 crédits) ; voir [MULTIMODAL.md](MULTIMODAL.md) |
+| Édition d'image, détourage, haute définition | non exposé | routes `inpaint`, `background-remove` repérées dans le code du site, non essayées |
 | Personnages, mémoire Venice, historique de conversations | non | le pont est sans état : le client renvoie tout l'historique |
 | `/v1/embeddings`, `/v1/completions`, `/v1/responses`, `/v1/messages` | **non exposés par le pont** | pour Codex CLI et Claude Code, passer par OmniRoute qui traduit ces formats ([HARNESS.md](HARNESS.md)) |
 | Température / `top_p` sur la route agents | ignorés | Venice ne les accepte pas sur cette route |

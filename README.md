@@ -87,7 +87,8 @@ Puis, pour un client OpenAI quelconque : `./venice-setup harness openai`. Un exe
 | [docs/OMNIROUTE.md](docs/OMNIROUTE.md) | Alias, clients, bogue du masqueur de secrets (3.8.52) et réglage |
 | [docs/SECURITE.md](docs/SECURITE.md) | Risque CGU, plafonds, liste blanche, alerte solde, où vivent les secrets |
 | [docs/DEPANNAGE.md](docs/DEPANNAGE.md) | 401, 403, 429, 503, cookie expiré, contexte tronqué, doublons, mémoire… |
-| [docs/LIMITES.md](docs/LIMITES.md) | Ce qui n'est **pas** pris en charge (images, voix, vision…) |
+| [docs/MULTIMODAL.md](docs/MULTIMODAL.md) | Images en entrée et en sortie, fichiers, voix : routes, formats, coûts mesurés |
+| [docs/LIMITES.md](docs/LIMITES.md) | Ce qui n'est **pas** pris en charge |
 | [docs/EXEMPLE.md](docs/EXEMPLE.md) | Exemple de bout en bout |
 | [pont/ROUTES.md](pont/ROUTES.md) | Routes Venice relevées et champs de requête |
 | [pont/bench-2026-10-28.md](pont/bench-2026-10-28.md) | Banc de mesures du 28/10/2026 |
@@ -105,11 +106,11 @@ Puis, pour un client OpenAI quelconque : `./venice-setup harness openai`. Un exe
 | `harness NOM [--modele M] [--appliquer]` | configuration pour un client (`opencode`, `openai`, `omniroute`, `hermes`, `openwebui`, `aider`, `cline`, `continue`, `codex`, `claude-code`) |
 | `profils` | liste les profils (un profil = un compte = un pont) |
 
-Tests : `python -m pytest tests pont/tests` (76 tests, aucun appel réseau).
+Tests : `python -m pytest tests pont/tests` (138 tests, aucun appel réseau).
 
 ## Ce qui n'est pas pris en charge
 
-Images (entrée ou génération), voix, transcription, pièces jointes, personnages, mémoire Venice : voir [docs/LIMITES.md](docs/LIMITES.md). Le test de **vision** du 28/10/2026 a échoué : le chemin web refuse un contenu multimodal au format OpenAI (HTTP 400, « Expected string, received array »).
+Génération vidéo ou musique, édition d'image, audio ou vidéo en entrée d'un modèle, personnages, mémoire Venice : voir [docs/LIMITES.md](docs/LIMITES.md). Le **multimodal** (vision, fichiers, génération d'images, synthèse et transcription vocales) fonctionne : voir [docs/MULTIMODAL.md](docs/MULTIMODAL.md).
 
 ## Arborescence
 

@@ -32,8 +32,24 @@ Champs vérifiés : `requestId`, `conversationType:"text"`, `type:"text"`, `mode
 ## Route agents : corps de requête
 `{"clientTools": [], "input": {"messages": [{"type":"message","role":"user","id":"…","status":"completed","content":[{"type":"output_text","text":"…","annotations":[]}]}]}}`. Pas de champ système ni de température : le système passe comme premier message utilisateur `[System]\n…`. Flux : `response.output_text.delta` (le raisonnement arrive avec un `item_id` en `rs_…`, la réponse en `agent-node:llm:0`), `response.output_text.done` avec `context_metadata {total_tokens, max_context_length: 524288}`, puis `response.completed`. Les `clientTools` natifs ne sont pas utilisés : les outils sont émulés comme sur le chat classique. Prompt imposé par Venice ≈ 15k jetons ; compactage du contexte au-delà de ~250k. Crédits : 0 sur DeepSeek V4.1 Flash Uncensored et Kimi K2.5 au banc.
 
+## Multimodal (28/10/2026, lu dans le code du site puis un essai par route, solde 285 avant/après chaque essai)
+Corps et détails : [docs/MULTIMODAL.md](../docs/MULTIMODAL.md).
+| Route | Corps | Réponse | Statut |
+|---|---|---|---|
+| `POST /api/inference/chat` | `prompt[].imagePath: [base64 brut]` (dernier message avec image seulement) ; `audioPath`, `videoPath` (modèles payants) ; `isFile: true` pour un fichier inliné | NDJSON | testé, 8 modèles sans pièce |
+| `POST /api/inference/text_parser` | multipart `file` | `{text, tokens}` ; PDF sans texte : 400 `InvalidFileException` | testé |
+| `POST /api/inference/image` | `modelId, prompt, width, height, steps, seed, requestId, hideWatermark, matureFilter, format(png|webp), embedExifMetadata, negativePrompt…` ; **ne jamais envoyer `acceptCreditFallback`** | octets de l'image ; en-têtes `x-ratelimit-remaining`, `x-venice-is-content-violation`, `x-venice-is-blurred` | testé (`z-image-turbo`, 0 crédit) |
+| `POST /api/inference/image/quote` | `modelId, prompt, variants` | `{quote}` (crédits de repli) : 2 (z-image-turbo), 3 (flux-2-pro) | testé, gratuit |
+| `POST /api/inference/tts` | `{input, model, voice, response_format(mp3|wav), speed}` | audio | testé, 11 modèles |
+| `POST /api/inference/asr` | multipart `file` + `model=nvidia/parakeet-tdt-0.6b-v3`, `responseFormat`, `timestamps` ; ou JSON `audio` en base64 | `{text}` (aucun horodatage reçu malgré `timestamps`) | testé |
+| `GET /api/inference/rate-limits` | — | `{chat, conversation, image, inpaint, scrape: {remaining, resetAt}}` | testé |
+| `POST /api/inference/video/quote` | `modelId, prompt, duration, resolution…` | `{quote}` : 55 (wan-2-7, 5 s) | testé, gratuit |
+| `POST /api/inference/video/queue`, `GET /video/retrieve`, `/music/queue` | voir schémas du site | file d'attente | **non essayé** (141 + 20 modèles tous payants) |
+| `POST /api/inference/inpaint`, `/background-remove`, `/multi-edit` | multipart | image | repéré, non essayé |
+| `GET /api/app/models` | — | catalogue par catégorie (`image`, `inpaint`, `text`, `tts`, `music`, `video`, `embedding`), drapeau `usesCredits` par modèle | testé |
+
 ## Non cartographié ou non testé (volontairement)
-Images (1000/jour annoncés), TTS, ASR, upload de fichiers et pièces jointes, personnages, mémoire, historique de conversations : routes non relevées, rien d'essayé (risque de débit de crédits, de modification du compte ou d'usage au-delà de ce que le propriétaire du compte a décidé). À cartographier par observation du navigateur du propriétaire du compte si besoin.
+Personnages, mémoire, historique de conversations, vision sur la route agents (média passant par un manifeste propre aux « minds »), génération vidéo et musique, édition d'image.
 
 ## Risques
 Usage en zone grise des CGU : cookie de session utilisé par un programme. Garde-fous : plafond 20 req/min côté OmniRoute, pas de boucle, arrêt au premier 429.

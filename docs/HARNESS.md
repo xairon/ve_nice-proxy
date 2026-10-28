@@ -68,6 +68,21 @@ curl -s http://127.0.0.1:8700/v1/chat/completions \
 
 Champs supplémentaires acceptés : `reasoning_effort: "none"` (coupe la réflexion), `web_search`, `include_venice_system_prompt`, `autoriser_debit`.
 
+Image en entrée, image en sortie, voix (détails et limites : [MULTIMODAL.md](MULTIMODAL.md)) :
+
+```bash
+# vision : modèle sans pièce + content en liste (data URL ou https)
+curl -s http://127.0.0.1:8700/v1/chat/completions -H "Authorization: Bearer $VENICE_PONT_CLE" -H 'Content-Type: application/json' \
+  -d '{"model":"qwen-3-8-27b","messages":[{"role":"user","content":[{"type":"text","text":"Décris."},{"type":"image_url","image_url":{"url":"https://exemple.org/photo.png"}}]}]}'
+# génération d'image (réponse : data[0].b64_json)
+curl -s http://127.0.0.1:8700/v1/images/generations -H "Authorization: Bearer $VENICE_PONT_CLE" -H 'Content-Type: application/json' \
+  -d '{"prompt":"une pomme rouge","size":"1024x1024"}'
+# synthèse vocale puis transcription
+curl -s http://127.0.0.1:8700/v1/audio/speech -H "Authorization: Bearer $VENICE_PONT_CLE" -H 'Content-Type: application/json' \
+  -d '{"input":"Bonjour","voice":"alloy"}' -o bonjour.mp3
+curl -s http://127.0.0.1:8700/v1/audio/transcriptions -H "Authorization: Bearer $VENICE_PONT_CLE" -F file=@bonjour.mp3 -F model=whisper-1
+```
+
 ## Hermes Agent
 
 Dans `~/.hermes/config.yaml` (le format `providers:` a été comparé à une configuration Hermes v0.22.2 réelle) :
@@ -84,6 +99,8 @@ providers:
 Le chemin **testé** passe par OmniRoute : `base_url: http://127.0.0.1:20128/v1`, `key_env: <variable de la clé OmniRoute>`, `model: ven-qwen-nc`. Dans une conversation Hermes, on change de fournisseur avec `/model ven-qwen-nc --provider <nom>` : **sans `--provider`**, le modèle est cherché chez le fournisseur par défaut et l'erreur « model ID not valid » apparaît.
 
 ## Open WebUI
+
+Images, voix et dictée : Administration > Paramètres > Images (moteur OpenAI, URL du pont, modèle `z-image-turbo`), Audio (TTS et STT : moteur OpenAI, même URL et même clé). La vision marche avec un modèle de la liste vision de [MODELES.md](MODELES.md). Réglages à confirmer dans votre version d'Open WebUI : le pont répond toujours en `b64_json` pour les images.
 
 *Réglages > Connexions > OpenAI > +* : URL `http://127.0.0.1:20128/v1` (OmniRoute) ou `http://127.0.0.1:8700/v1` (pont), clé correspondante, puis filtrer la liste de modèles. Avec Docker en réseau hôte (`network_mode: host`), `127.0.0.1` désigne bien la machine ; en réseau pont, utiliser l'adresse de l'hôte. Recommandations (testées dans notre déploiement) : **authentification activée** (`WEBUI_AUTH=True`, `ENABLE_SIGNUP=False`), titres/tags/suggestions automatiques **coupés** (ils consomment votre plafond de requêtes), `mem_limit` posé.
 

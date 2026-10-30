@@ -7,6 +7,15 @@ Brancher un compte **Venice** (abonnement Pro) sur vos outils d'IA — OpenCode,
 > ## ⚠️ À lire avant tout : conditions d'utilisation de Venice
 > Ce projet fait utiliser **le cookie de session web** de votre compte par un programme. Les conditions d'utilisation de Venice **interdisent l'usage programmatique** du compte web : l'API officielle (payante à l'usage) est le chemin prévu. **Votre compte peut être suspendu.** Utilisez-le à vos risques, avec un compte dont vous acceptez de risquer l'accès, à faible cadence (le pont plafonne à 20 requêtes par minute par défaut). Les auteurs n'ont aucun lien avec Venice et ne donnent aucune garantie (licence MIT, voir `LICENSE`). Détails : [docs/SECURITE.md](docs/SECURITE.md).
 
+## En bref
+
+```bash
+git clone https://github.com/xairon/ve_nice-proxy && cd ve_nice-proxy
+./venice-setup quickstart      # cookie > service > état > configuration d'un client
+```
+
+Le pont écoute ensuite sur `127.0.0.1:8700` et sert une API OpenAI-compatible. Le **tool calling** (lire, écrire, lancer) est **émulé** dans le prompt, pas natif : comprendre pourquoi et le tester → [docs/OUTILS.md](docs/OUTILS.md).
+
 ## À quoi ça sert
 
 L'API publique de Venice est facturée à l'usage. L'abonnement Pro donne, **sur le site**, des modèles illimités (ceux qui n'affichent pas de pièce dans le sélecteur). Le pont permet à vos outils de développement d'utiliser ces modèles comme s'ils parlaient à une API OpenAI. Il :
@@ -96,6 +105,7 @@ Windows : les tests du pont passent sur le runner Windows de la CI (28/10/2026),
 | [docs/INSTALL.md](docs/INSTALL.md) | Installation pas à pas, plusieurs comptes, désinstallation |
 | [docs/COOKIE.md](docs/COOKIE.md) | Récupérer le cookie `__client` (Chrome, Firefox), durée de vie, renouvellement |
 | [docs/MODELES.md](docs/MODELES.md) | Modèles gratuits (sans pièce) et payants, contextes mesurés, lequel choisir |
+| [docs/OUTILS.md](docs/OUTILS.md) | Tool calling émulé : pourquoi pas natif, garde-fous, comment le tester |
 | [docs/HARNESS.md](docs/HARNESS.md) | Chaque client : état **testé / non testé**, configuration exacte |
 | [docs/OMNIROUTE.md](docs/OMNIROUTE.md) | Alias, clients, bogue du masqueur de secrets (3.8.52) et réglage |
 | [docs/SECURITE.md](docs/SECURITE.md) | Risque CGU, plafonds, liste blanche, alerte solde, où vivent les secrets |
@@ -119,11 +129,11 @@ Windows : les tests du pont passent sur le runner Windows de la CI (28/10/2026),
 | `harness NOM [--modele M] [--appliquer]` | configuration pour un client (`opencode`, `openai`, `omniroute`, `hermes`, `openwebui`, `aider`, `cline`, `continue`, `codex`, `claude-code`) |
 | `profils` | liste les profils (un profil = un compte = un pont) |
 
-Tests : `python -m pytest tests pont/tests` (208 tests, aucun appel réseau).
+Tests : `python -m pytest tests pont/tests` (222 tests, aucun appel réseau).
 
 ## Ce qui n'est pas pris en charge
 
-Génération vidéo ou musique, édition d'image, audio ou vidéo en entrée d'un modèle, personnages, mémoire Venice : voir [docs/LIMITES.md](docs/LIMITES.md). Le **multimodal** (vision, fichiers, génération d'images, synthèse et transcription vocales) fonctionne : voir [docs/MULTIMODAL.md](docs/MULTIMODAL.md).
+Génération vidéo ou musique, édition d'image, audio ou vidéo en entrée d'un modèle, personnages, mémoire Venice : voir [docs/LIMITES.md](docs/LIMITES.md). Le **multimodal** (vision, fichiers, génération d'images, synthèse et transcription vocales) fonctionne : voir [docs/MULTIMODAL.md](docs/MULTIMODAL.md). Le **tool calling natif** n'est pas exposé par le chemin web : les outils sont émulés, avec une relance corrective si le modèle appelle un outil natif de Venice ([docs/OUTILS.md](docs/OUTILS.md)).
 
 ## Arborescence
 

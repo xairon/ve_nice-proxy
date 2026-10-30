@@ -14,8 +14,8 @@ Le pont traduit le **texte**, les **images** (entrée et sortie), les **fichiers
 | `/v1/completions`, `/v1/responses`, `/v1/messages` | **non exposés par le pont** | pour Codex CLI et Claude Code, passer par OmniRoute qui traduit ces formats ([HARNESS.md](HARNESS.md)) |
 | Température / `top_p` sur la route agents | ignorés | Venice ne les accepte pas sur cette route |
 | Comptage de jetons | non | `usage` à zéro ou estimé |
-| Vrai streaming | non | réponse complète reçue puis rejouée par morceaux |
-| Appels d'outils natifs | non | émulés dans le prompt ; fiabilité variable selon le modèle |
+| Vrai streaming | partiel | relayé au fil de l'eau sans outils ; mis en tampon quand des outils sont fournis (le JSON d'appel doit être complet) |
+| Appels d'outils natifs | non | émulés dans le prompt ; une prose avant l'appel est tolérée, et un refus « Tool not found » déclenche une relance corrective. Fiabilité variable selon le modèle |
 | Contexte au-delà de ~39k sur le chat classique | tronqué en silence | utiliser la route agents (Kimi, DeepSeek) |
 | Modèles payants | refusés par défaut | [MODELES.md](MODELES.md) |
 | Recherche web / lecture de page / recherche X | optionnel, désactivé par défaut | champs `web_search`, `web_scrape`, `x_search` dans la requête (chat classique) ; seul `web_search` a été essayé (1 essai, 0 crédit, citations `^n^`) |

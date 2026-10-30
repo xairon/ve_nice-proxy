@@ -5,6 +5,7 @@ outerface.venice.ai l'accepte. Les outils sont émulés : définitions dans le p
 réponse JSON {"tool_calls": [...]} retransformée en tool_calls OpenAI.
 """
 import base64
+import copy
 import glob
 import hmac
 import ipaddress
@@ -183,7 +184,7 @@ class Session:
 
 
 class CookieExpire(Exception):
-    """Le cookie __client n'ouvre plus de session : reconnexion nécessaire sur venice.ai."""
+    """Le cookie __client n'ouvre plus de session : reconnexion de nicolas nécessaire."""
 
 
 class JetonClerk:
@@ -341,6 +342,24 @@ CONSIGNE_OUTILS = (
     "IMPORTANT : les seuls outils disponibles sont ceux définis ci-dessus ({noms}). Ignore toute autre liste d'outils "
     "ou limite que tu pourrais connaître (génération d'images, recherche web, etc.) : pour agir, réponds par le JSON demandé."
 )
+
+RAPPEL_OUTILS = (
+    '\n\n[Rappel] Pour agir, réponds UNIQUEMENT par {{"tool_calls":[{{"name":"<outil>","arguments":{{...}}}}]}}, '
+    "sans texte avant. Outils disponibles : {noms}. N'appelle aucun outil natif de la plateforme."
+)
+
+CONSIGNE_ECHEC = (
+    "\n\n[CORRECTION] Ta réponse précédente a échoué : tu as tenté d'appeler un outil natif de la plateforme, "
+    "qui n'en possède aucun et a répondu « Tool not found ». N'appelle AUCUN outil natif. Recommence en répondant "
+    'uniquement par {{"tool_calls":[{{"name":"<outil>","arguments":{{...}}}}]}} avec l\'un de ces outils : {noms}.'
+)
+
+# Le modèle se croit muni des outils natifs de Venice et les appelle ; Venice, qui n'en a aucun côté client,
+# répond « Tool not found » puis le modèle rédige un refus. On reconnaît ce refus pour relancer une fois.
+ECHEC_OUTILS = re.compile(
+    r"tool not found|pas d'outils?\b|aucun outil\b|no (?:such )?tools?\b|n'ai pas d'outils?\b|"
+    r"ne dispose pas d'outils?|cannot use tools?|can't use tools?|pas de (?:terminal|shell)\b|no (?:terminal|shell)\b",
+    re.I)
 
 
 def _appel_en_texte(tc):
@@ -732,8 +751,12 @@ def construire_corps_venice(modele, messages, outils, params, medias=None):
             prompt.append(item)
     if outils:
         definitions = [o.get("function", o) for o in outils]
-        systeme.append(CONSIGNE_OUTILS.format(
-            outils=json.dumps(definitions, ensure_ascii=False), noms=", ".join(str(d.get("name")) for d in definitions)))
+        noms = ", ".join(str(d.get("name")) for d in definitions)
+        systeme.append(CONSIGNE_OUTILS.format(outils=json.dumps(definitions, ensure_ascii=False), noms=noms))
+        # Derrière un long prompt système (OpenCode, ~17k jetons), le modèle oublie la consigne et appelle l'outil en natif
+        # chez Venice (« Tool not found ») : on la répète en fin du dernier message, là où il lit en dernier.
+        if prompt and prompt[-1]["role"] == "user":
+            prompt[-1]["content"] = (prompt[-1]["content"] or "") + RAPPEL_OUTILS.format(noms=noms)
     corps = {
         "requestId": uuid.uuid4().hex[:7],
         "conversationType": "text",
@@ -760,6 +783,9 @@ _PENSEE = re.compile(r"<think>.*?</think>", re.S)
 _CLOTURE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.S)
 
 
+_DEBUT_APPEL = re.compile('[{] *"tool_calls" *:')
+
+
 def extraire_appels(texte, outils):
     """(contenu, tool_calls) : tool_calls non None si le texte est un appel d'outil valide."""
     if not outils or not texte:
@@ -769,8 +795,12 @@ def extraire_appels(texte, outils):
     m = _CLOTURE.match(brut)
     if m:
         brut = m.group(1)
+    # Le modèle annonce souvent son geste avant l'appel (« Je vais lire le fichier :\n{...} ») : on prend le
+    # premier objet {"tool_calls": …}. La liste blanche des noms empêche d'exécuter un exemple cité.
+    debut = _DEBUT_APPEL.search(brut)
+    prose = brut[:debut.start()].strip() if debut else ""
     try:
-        obj, _fin = json.JSONDecoder().raw_decode(brut)  # un modèle peut enchaîner du texte après l'appel
+        obj, _fin = json.JSONDecoder().raw_decode(brut[debut.start():] if debut else brut)
     except ValueError:
         return texte, None
     liste = obj.get("tool_calls") if isinstance(obj, dict) else None
@@ -784,7 +814,24 @@ def extraire_appels(texte, outils):
             "type": "function",
             "function": {"name": t["name"], "arguments": args if isinstance(args, str) else json.dumps(args, ensure_ascii=False)},
         })
-    return None, appels
+    return prose or None, appels
+
+
+def refus_outils(texte):
+    """Vrai si le modèle, outils fournis, affirme qu'aucun outil n'est disponible (outils natifs refusés)."""
+    return bool(texte) and bool(ECHEC_OUTILS.search(texte))
+
+
+def rappeler_correction(corps, outils):
+    """Copie du corps Venice avec la consigne corrective en tête de système et en fin de dernier message."""
+    noms = ", ".join(str(o.get("function", o).get("name")) for o in outils)
+    consigne = CONSIGNE_ECHEC.format(noms=noms)
+    corrige = copy.deepcopy(corps)
+    corrige["systemPrompt"] = (corrige.get("systemPrompt") or "") + consigne
+    prompt = corrige.get("prompt") or []
+    if prompt and prompt[-1].get("role") == "user":
+        prompt[-1]["content"] = (prompt[-1].get("content") or "") + consigne
+    return corrige
 
 
 def morceaux_contenu(lignes):
@@ -799,15 +846,40 @@ def morceaux_contenu(lignes):
             yield o["content"]
 
 
-def reponse_openai(modele, contenu, appels, jetons=0):
+def _jetons_estimes(texte):
+    """Estimation ~4 caractères par jeton : aucun tokeniseur ici, sert à répartir l'usage, pas à facturer."""
+    return max(1, (len(texte) + 3) // 4) if texte else 0
+
+
+def _texte_corps(corps):
+    """Texte envoyé à Venice (système + messages) pour estimer l'entrée quand la route chat ne donne aucun total."""
+    if not corps:
+        return ""
+    morceaux = [corps.get("systemPrompt") or ""]
+    for m in corps.get("prompt") or []:
+        contenu = m.get("content")
+        if isinstance(contenu, str):
+            morceaux.append(contenu)
+    return "".join(morceaux)
+
+
+def reponse_openai(modele, contenu, appels, jetons=0, entree=None):
     msg = {"role": "assistant", "content": contenu}
     if appels:
         msg["tool_calls"] = appels
+    sortie = (contenu or "") if not appels else "".join(
+        tc.get("function", {}).get("arguments") or "" for tc in appels)
+    completion = _jetons_estimes(sortie)
+    if jetons:  # total réel du contexte (route agents) : la sortie en est déduite
+        prompt, total = max(0, jetons - completion), jetons
+    else:       # route chat : Venice ne donne rien, on estime l'entrée réellement envoyée
+        prompt = _jetons_estimes(_texte_corps(entree))
+        total = prompt + completion
     return {
         "id": "chatcmpl-" + uuid.uuid4().hex[:24], "object": "chat.completion",
         "created": int(time.time()), "model": modele,
         "choices": [{"index": 0, "message": msg, "finish_reason": "tool_calls" if appels else "stop"}],
-        "usage": {"prompt_tokens": jetons, "completion_tokens": 0, "total_tokens": jetons},
+        "usage": {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": total},
     }
 
 
@@ -823,13 +895,17 @@ def morceaux_sse(rep):
 
     appels = ch["message"].get("tool_calls")
     if not appels:
-        return [morceau({"role": "assistant", "content": ch["message"]["content"] or ""}),
-                morceau({}, ch["finish_reason"])]
-    entetes = [{"index": i, "id": tc["id"], "type": tc["type"],
-                "function": {"name": tc["function"]["name"], "arguments": ""}} for i, tc in enumerate(appels)]
-    args = [{"index": i, "function": {"arguments": tc["function"]["arguments"]}} for i, tc in enumerate(appels)]
-    return [morceau({"role": "assistant", "tool_calls": entetes}), morceau({"tool_calls": args}),
-            morceau({}, ch["finish_reason"])]
+        sortie = [morceau({"role": "assistant", "content": ch["message"]["content"] or ""}),
+                  morceau({}, ch["finish_reason"])]
+    else:
+        entetes = [{"index": i, "id": tc["id"], "type": tc["type"],
+                    "function": {"name": tc["function"]["name"], "arguments": ""}} for i, tc in enumerate(appels)]
+        args = [{"index": i, "function": {"arguments": tc["function"]["arguments"]}} for i, tc in enumerate(appels)]
+        sortie = [morceau({"role": "assistant", "tool_calls": entetes}), morceau({"tool_calls": args}),
+                  morceau({}, ch["finish_reason"])]
+    if rep.get("usage"):  # dernier morceau : un client qui demande l'usage dans le flux le lit là
+        sortie[-1] = {**sortie[-1], "usage": rep["usage"]}
+    return sortie
 
 
 def cle_valide(entete, cle):
@@ -848,17 +924,24 @@ def lire_env(chemin):
 
 
 def discuter(jeton, corps):
-    """Itérateur de lignes NDJSON ; rejoue une fois avec un jeton neuf sur 401."""
-    for essai in (1, 2):
+    """Itérateur de lignes NDJSON ; rejoue sur 401 (jeton neuf) et sur 429/5xx (Venice surchargé)."""
+    for essai in range(3):
         r = requete("POST", OUTERFACE, corps_json=corps, stream=True, timeout=180, headers={
             **EN_TETES_WEB, "Referer": "https://venice.ai/chat", "Authorization": "Bearer " + jeton.obtenir()})
-        if r.status_code == 401 and essai == 1:
+        if r.status_code == 401 and essai == 0:
             jeton.invalider()
             r.close()
             continue
+        if (r.status_code == 429 or r.status_code >= 500) and essai < 2:
+            r.close()
+            time.sleep(1 + essai)
+            continue
         if r.status_code != 200:
-            raise RuntimeError(f"Venice {r.status_code}: {r.text[:200]}")
+            detail = r.text[:200]
+            r.close()
+            raise RuntimeError(f"Venice {r.status_code}: {detail}")
         return r.iter_lines(decode_unicode=True)  # Venice répond text/html sans charset : le décodage est en UTF-8
+
 
 
 MODELES_AGENT = set(filter(None, os.environ.get(
@@ -885,9 +968,9 @@ def messages_agent(corps):
     return msgs
 
 
-def lire_flux_agent(lignes):
-    """Flux SSE de la route agents -> (texte, jetons totaux du contexte, système imposé par Venice compris)."""
-    evenement, texte, jetons = None, [], 0
+def deltas_agent(lignes, etat):
+    """Flux SSE de la route agents -> morceaux de texte (le raisonnement rs_ est écarté) ; l'état porte les jetons."""
+    evenement = None
     for ligne in lignes:
         if ligne.startswith("event:"):
             evenement = ligne[6:].strip()
@@ -899,33 +982,58 @@ def lire_flux_agent(lignes):
             if evenement == "response.output_text.delta":
                 if str(d.get("item_id", "")).startswith("rs_"):  # raisonnement : pas dans la réponse
                     continue
-                texte.append(d.get("delta", ""))
+                morceau = d.get("delta", "")
+                if morceau:
+                    yield morceau
             elif evenement == "response.output_text.done":
-                jetons = (d.get("context_metadata") or {}).get("total_tokens", jetons)
+                etat["jetons"] = (d.get("context_metadata") or {}).get("total_tokens", etat["jetons"])
             elif evenement in ("response.failed", "response.error", "error"):
                 err = (d.get("response") or d).get("error") or d
                 raise RuntimeError(f"Venice agent: {json.dumps(err, ensure_ascii=False)[:200]}")
-    return "".join(texte), jetons
 
 
-def discuter_agent(jeton, modele, corps):
-    """Appelle la route agents ; rejoue une fois avec un jeton neuf sur 401. Renvoie (texte, jetons)."""
-    for essai in (1, 2):
+def lire_flux_agent(lignes):
+    """Flux SSE de la route agents -> (texte, jetons totaux, système imposé par Venice compris)."""
+    etat = {"jetons": 0}
+    return "".join(deltas_agent(lignes, etat)), etat["jetons"]
+
+
+def reponse_agent(jeton, modele, corps):
+    """Lignes SSE de la route agents ; rejoue sur 401 (jeton neuf) et sur 429/5xx."""
+    for essai in range(3):
         r = requete("POST", AGENTS, params={"agentModelId": modele}, stream=True, timeout=300,
                     corps_json={"clientTools": [], "input": {"messages": messages_agent(corps)}},
                     headers={**EN_TETES_WEB, "Referer": "https://venice.ai/chat",
                              "Accept": "text/event-stream", "x-venice-locale": "en",
                              "Authorization": "Bearer " + jeton.obtenir()})
-        if r.status_code == 401 and essai == 1:
+        if r.status_code == 401 and essai == 0:
             jeton.invalider()
             r.close()
             continue
+        if (r.status_code == 429 or r.status_code >= 500) and essai < 2:
+            r.close()
+            time.sleep(1 + essai)
+            continue
         if r.status_code != 200:
-            raise RuntimeError(f"Venice {r.status_code}: {r.text[:200]}")
-        return lire_flux_agent(r.iter_lines(decode_unicode=True))
+            detail = r.text[:200]
+            r.close()
+            raise RuntimeError(f"Venice {r.status_code}: {detail}")
+        return r.iter_lines(decode_unicode=True)
 
 
-# Modèles sans pièce = illimités avec Pro (relevé dans le sélecteur de venice.ai, banc du 28/10/2026 : 0 crédit débité).
+def discuter_agent(jeton, modele, corps):
+    """Appelle la route agents et lit le flux complet. Renvoie (texte, jetons)."""
+    return lire_flux_agent(reponse_agent(jeton, modele, corps))
+
+
+def lire_reponse(jeton, modele, corps):
+    """Texte et jetons d'une réponse Venice : route agents ou chat classique selon le modèle."""
+    if est_agent(modele):
+        return discuter_agent(jeton, modele, corps)
+    return "".join(morceaux_contenu(discuter(jeton, corps))), 0
+
+
+# Modèles sans pièce = illimités avec Pro (relevé de nicolas dans le sélecteur de venice.ai, banc du 28/10/2026 : 0 crédit débité).
 # Tout autre modèle est refusé (403) sauf débit volontaire : `autoriser_debit: true` dans la requête, ou VENICE_PONT_AUTORISER_PAYANTS=1.
 GRATUITS = set(filter(None, os.environ.get(
     "VENICE_PONT_GRATUITS",
@@ -1017,7 +1125,7 @@ class SuiviCredits:
     """Garde-fou crédits : alerte si le solde passe sous la référence (un modèle à pièce a débité).
 
     La référence monte avec une recharge (forfait mensuel) et se remet au solde courant sur acquittement. Elle survit
-    à un redémarrage (fichier). `alerte` est lue par /health puis par une sonde externe."""
+    à un redémarrage (fichier). `alerte` est lue par /health puis par sonde-tuf.sh (OnFailure=boussole-echec)."""
 
     SEUIL = 0.5
 
@@ -1419,12 +1527,17 @@ def fabriquer_handler(jeton, cle_pont, source=None, limiteur=None, suivi=None, l
                 return
             outils = req.get("tools") or None
             corps_venice = construire_corps_venice(modele, req["messages"], outils, req, medias)
-            if est_agent(modele):
-                texte, jetons = discuter_agent(jeton, modele, corps_venice)
-            else:
-                texte, jetons = "".join(morceaux_contenu(discuter(jeton, corps_venice))), 0
+            if req.get("stream") and not outils:  # sans outil, rien à analyser : relais au fil de l'eau
+                return self._chat_flux(modele, corps_venice)
+            texte, jetons = lire_reponse(jeton, modele, corps_venice)
             contenu, appels = extraire_appels(texte, outils)
-            rep = reponse_openai(modele, contenu, appels, jetons)
+            if outils and not appels and refus_outils(texte):
+                # Le modèle a tenté les outils natifs de Venice (« Tool not found ») : une relance corrective.
+                texte2, jetons2 = lire_reponse(jeton, modele, rappeler_correction(corps_venice, outils))
+                contenu2, appels2 = extraire_appels(texte2, outils)
+                if appels2:
+                    contenu, appels, jetons = contenu2, appels2, jetons2
+            rep = reponse_openai(modele, contenu, appels, jetons, corps_venice)
             if not req.get("stream"):
                 return self._json(200, rep)
             self._sse(rep)
@@ -1621,6 +1734,60 @@ def fabriquer_handler(jeton, cle_pont, source=None, limiteur=None, suivi=None, l
             image, _genre, _entetes = detourer_venice(jeton, f"data:{mime};base64,{base64.b64encode(octets).decode()}")
             self._sortie_images([{"b64_json": base64.b64encode(image).decode()}])
 
+        def _chat_flux(self, modele, corps_venice):
+            """Relais SSE au fil de l'eau : le client lit le premier morceau sans attendre la fin."""
+            etat = {"jetons": 0}
+            if est_agent(modele):
+                pieces = deltas_agent(reponse_agent(jeton, modele, corps_venice), etat)
+            else:
+                pieces = morceaux_contenu(discuter(jeton, corps_venice))
+            flux = iter(pieces)
+            try:  # premier morceau tiré avant les en-têtes : une erreur reste un vrai 502 JSON
+                premier = next(flux)
+            except StopIteration:
+                premier = None
+            except RuntimeError as e:
+                return self._erreur(502, "venice_erreur", str(e))
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            base = {"id": "chatcmpl-" + uuid.uuid4().hex[:24], "object": "chat.completion.chunk",
+                    "created": int(time.time()), "model": modele}
+
+            def envoyer(delta, fin=None):
+                m = {**base, "choices": [{"index": 0, "delta": delta, "finish_reason": fin}]}
+                self.wfile.write(b"data: " + json.dumps(m, ensure_ascii=False).encode() + b"\n\n")
+                self.wfile.flush()
+
+            envoyer({"role": "assistant", "content": ""})
+            texte = []
+
+            def ajouter(morceau):
+                texte.append(morceau)
+                envoyer({"content": morceau})
+
+            try:
+                if premier is not None:
+                    ajouter(premier)
+                for morceau in flux:
+                    ajouter(morceau)
+            except (BrokenPipeError, ConnectionResetError):
+                self.close_connection = True
+                return
+            except RuntimeError as e:  # erreur en cours de flux : le client a déjà reçu des morceaux
+                envoyer({"content": f"\n[erreur Venice : {e}]"})
+            sortie = _jetons_estimes("".join(texte))
+            total = etat["jetons"] or (_jetons_estimes(_texte_corps(corps_venice)) + sortie)
+            self.wfile.write(b"data: " + json.dumps(
+                {**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                 "usage": {"prompt_tokens": max(0, total - sortie), "completion_tokens": sortie,
+                           "total_tokens": total}}, ensure_ascii=False).encode() + b"\n\n")
+            self.wfile.write(b"data: [DONE]\n\n")
+            self.wfile.flush()
+            self.close_connection = True
+
         def _sse(self, rep):
             morceaux = morceaux_sse(rep)
             self.send_response(200)
@@ -1641,14 +1808,14 @@ class ServeurPont(ThreadingHTTPServer):
 
 
 def main():
-    fichier = os.environ.get("VENICE_PONT_ENV", "~/.config/venice-setup/defaut/venice.env")
+    fichier = os.environ.get("VENICE_PONT_ENV", "~/services/venice-pont/secrets/venice.env")
     env = lire_env(fichier)
     source = SourceClerk(env["VENICE_CLERK_CLIENT"], fichier)
     jeton = JetonClerk(source.mint)
     hote, port = os.environ.get("VENICE_PONT_ECOUTE", "127.0.0.1:8700").split(":")
     limiteur = LimiteurDebit(int(os.environ.get("VENICE_PONT_MAX_PAR_MIN", "20")))
     suivi = SuiviCredits(lambda: lire_solde(jeton), fichier=os.path.expanduser(
-        os.environ.get("VENICE_PONT_CREDITS", "~/.config/venice-setup/defaut/credits.json")))
+        os.environ.get("VENICE_PONT_CREDITS", "~/services/venice-pont/credits.json")))
     limiteur_images = LimiteurDebit(int(os.environ.get("VENICE_PONT_MAX_IMAGES_PAR_MIN", "10")))
     limiteur_voix = LimiteurDebit(int(os.environ.get("VENICE_PONT_MAX_VOIX_PAR_MIN", "30")))
     quotas = SuiviQuotas(lambda: lire_quotas_venice(jeton))

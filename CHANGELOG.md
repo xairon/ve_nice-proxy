@@ -1,5 +1,10 @@
 # Historique
 
+## Non publié
+
+### Corrigé
+- Outils émulés (30/10/2026, OpenCode) : une prose avant l'appel JSON est acceptée et devient le contenu ; quand le modèle appelle un outil natif de Venice et se voit répondre « Tool not found », le pont relance une fois avec une consigne corrective qui force le format JSON. Même requête rejouée : 12/12 appels d'outil produits, écriture de fichier vérifiée de bout en bout.
+
 ## 0.1.0 — 28/10/2026 (première version publiée)
 
 ### Corrigé

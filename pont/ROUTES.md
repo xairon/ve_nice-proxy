@@ -30,7 +30,7 @@ Champs vérifiés : `requestId`, `conversationType:"text"`, `type:"text"`, `mode
 | Concurrence | — | oui | 0 | 16 simultanées sans 429 |
 
 ## Route agents : corps de requête
-`{"clientTools": [], "input": {"messages": [{"type":"message","role":"user","id":"…","status":"completed","content":[{"type":"output_text","text":"…","annotations":[]}]}]}}`. Pas de champ système ni de température : le système passe comme premier message utilisateur `[System]\n…`. Flux : `response.output_text.delta` (le raisonnement arrive avec un `item_id` en `rs_…`, la réponse en `agent-node:llm:0`), `response.output_text.done` avec `context_metadata {total_tokens, max_context_length: 524288}`, puis `response.completed`. Les `clientTools` natifs ne sont pas utilisés : les outils sont émulés comme sur le chat classique. Prompt imposé par Venice ≈ 15k jetons ; compactage du contexte au-delà de ~250k. Crédits : 0 sur DeepSeek V4.1 Flash Uncensored et Kimi K2.5 au banc.
+`{"clientTools": [], "input": {"messages": [{"type":"message","role":"user","id":"…","status":"completed","content":[{"type":"output_text","text":"…","annotations":[]}]}]}}`. Pas de champ système ni de température : le système passe comme premier message utilisateur `[System]\n…`. Flux : `response.output_text.delta` (le raisonnement arrive avec un `item_id` en `rs_…`, la réponse en `agent-node:llm:0`), `response.output_text.done` avec `context_metadata {total_tokens, max_context_length: 524288}`, puis `response.completed`. Les `clientTools` natifs ne sont pas utilisés : les outils sont émulés comme sur le chat classique. Formes essayées le 30/10/2026 (`{name, description, inputSchema}` nu, `type:"function"`, `type`/`execution`/`source`/`kind` numériques, `execution:"client"`, `type:"client"`, valeurs 1) : toutes acceptées en 200, aucune n'apparaît dans le contexte du modèle, qui continue de ne voir que ses outils internes. Prompt imposé par Venice ≈ 15k jetons ; compactage du contexte au-delà de ~250k. Crédits : 0 sur DeepSeek V4.1 Flash Uncensored et Kimi K2.5 au banc.
 
 ## Multimodal (28/10/2026, lu dans le code du site puis un essai par route, solde 285 avant/après chaque essai)
 Corps et détails : [docs/MULTIMODAL.md](../docs/MULTIMODAL.md).
@@ -69,5 +69,5 @@ Tâche : module JS `energie.mjs` + tests `node:test` + README, outils d'OpenCode
 | Qwen 3.8 27B (chat) | 32 s | 7 | 15/15 tests |
 | Kimi K2.5 (agents) | 57 s | ~6 | 12/12 tests |
 | Kimi K2.7 Code (chat, débité) | 70 s | 6 | 11/11 tests |
-| DeepSeek V4.1 Flash NC (agents) | 22 à 131 s | 1 à 3 | échec : se croit limité aux outils Venice (« Tool not found »), rien écrit |
+| DeepSeek V4.1 Flash NC (agents) | 22 à 131 s | 1 à 3 | échec : se croit limité aux outils Venice (« Tool not found »), rien écrit — **corrigé le 30/10/2026** par la relance corrective (voir [docs/OUTILS.md](../docs/OUTILS.md)) |
 Via OmniRoute : 146 s puis abandon, écritures longues refusées (arguments d'outil dupliqués).

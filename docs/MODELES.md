@@ -48,7 +48,7 @@ GLM 5.2 et 5.3 Flash, Kimi K2.7 Code, DeepSeek V4.1 Flash (version chat), Aion 3
 - **Chat classique** : plafond entre 39 000 et 40 000 jetons. Au-delà, **pas d'erreur** : HTTP 200, mais Venice garde la fin et jette le début (le prompt système peut disparaître). Réglez vos clients à ~38 000 (`limit.context`).
 - **Route agents** : fenêtre annoncée 524 288 (DeepSeek) ou 262 144 (Kimi). Un message minimal consomme déjà ~14 à 15k jetons. Contexte compacté côté serveur au-delà de ~250k. Température et `top_p` ignorés.
 - **Pas de comptage de jetons** : `usage` vaut zéro (chat classique) ou une estimation (route agents).
-- **Pas de vrai flux** : la réponse est reçue en entier puis rejouée en SSE.
+- **Flux partiel** : une réponse sans outil est relayée au fil de l'eau (premier morceau à ~0,8 s) ; avec des outils, elle est mise en tampon pour analyser l'appel JSON avant l'envoi.
 - **Débit** : 16 requêtes simultanées sans 429 ; 60 requêtes en 3 minutes sans refus ; le pont plafonne de toute façon à 20/minute.
 - **Appels d'outils** : émulés (définitions dans le prompt, réponse JSON retransformée). Un modèle peut répondre en texte : l'agent client doit tolérer l'absence d'appel.
 

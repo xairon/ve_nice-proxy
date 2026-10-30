@@ -129,6 +129,66 @@ def test_reponse_openai_texte():
     assert rep["choices"][0]["message"]["content"] == "ok"
 
 
+def test_usage_repartit_le_total_connu_entre_entree_et_sortie():
+    """Venice donne le total du contexte (route agents) mais pas la sortie : la sortie est estimée, le reste est l'entrée."""
+    rep = vp.reponse_openai("m", "x" * 400, None, jetons=1000)
+    u = rep["usage"]
+    assert u["completion_tokens"] == 100
+    assert u["prompt_tokens"] == 900
+    assert u["total_tokens"] == 1000
+
+
+def test_usage_estime_l_entree_quand_venice_ne_donne_aucun_total():
+    corps = {"systemPrompt": "s" * 400, "prompt": [{"role": "user", "content": "u" * 400}]}
+    u = vp.reponse_openai("m", "ok", None, 0, corps)["usage"]
+    assert u["prompt_tokens"] >= 200
+    assert u["completion_tokens"] >= 1
+    assert u["total_tokens"] == u["prompt_tokens"] + u["completion_tokens"]
+
+
+class _ReponseFactice:
+    def __init__(self, code, lignes=()):
+        self.status_code, self._lignes, self.ferme = code, list(lignes), False
+        self.text = ""
+
+    def iter_lines(self, decode_unicode=False):
+        return iter(self._lignes)
+
+    def close(self):
+        self.ferme = True
+
+
+class _JetonFactice:
+    def __init__(self):
+        self.invalide = 0
+
+    def obtenir(self):
+        return "j"
+
+    def invalider(self):
+        self.invalide += 1
+
+
+def test_discuter_reessaie_apres_une_surcharge_500(monkeypatch):
+    appels = []
+
+    def faux_requete(*a, **k):
+        appels.append(1)
+        return _ReponseFactice(500 if len(appels) == 1 else 200, ['{"content":"ok","kind":"content"}'])
+
+    monkeypatch.setattr(vp, "requete", faux_requete)
+    monkeypatch.setattr(vp.time, "sleep", lambda s: None)
+    assert "".join(vp.morceaux_contenu(vp.discuter(_JetonFactice(), {}))) == "ok"
+    assert len(appels) == 2
+
+
+def test_discuter_abandonne_apres_trois_echecs(monkeypatch):
+    monkeypatch.setattr(vp, "requete", lambda *a, **k: _ReponseFactice(503))
+    monkeypatch.setattr(vp.time, "sleep", lambda s: None)
+    with pytest.raises(RuntimeError, match="503"):
+        vp.discuter(_JetonFactice(), {})
+
+
 def test_authentification_cle_pont():
     assert vp.cle_valide("Bearer secret", "secret")
     assert not vp.cle_valide("Bearer autre", "secret")
@@ -395,6 +455,16 @@ def test_sse_texte_simple_inchange():
     assert morceaux[-1]["choices"][0]["finish_reason"] == "stop"
 
 
+def test_sse_porte_l_usage_sur_le_dernier_morceau_seulement():
+    """Sans usage dans le flux, opencode compte 0 jeton : la compaction automatique ne se déclenche plus."""
+    morceaux = vp.morceaux_sse(vp.reponse_openai("m", "Salut", None, jetons=1000))
+    assert morceaux[-1]["usage"]["total_tokens"] == 1000
+    assert all("usage" not in m for m in morceaux[:-1])
+    appels = [{"id": "call_a", "type": "function", "function": {"name": "get_time", "arguments": "{}"}}]
+    appel = vp.morceaux_sse(vp.reponse_openai("m", None, appels, jetons=800))
+    assert appel[-1]["usage"]["total_tokens"] == 800
+
+
 def test_extraction_ignore_le_texte_apres_l_appel():
     texte = '{"tool_calls":[{"name":"get_time","arguments":{"ville":"Paris"}}]}Résumé de la session. Tool not found.'
     contenu, appels = vp.extraire_appels(texte, OUTILS)
@@ -402,10 +472,34 @@ def test_extraction_ignore_le_texte_apres_l_appel():
     assert json.loads(appels[0]["function"]["arguments"]) == {"ville": "Paris"}
 
 
-def test_texte_qui_ne_commence_pas_par_un_appel_reste_du_texte():
-    texte = 'Voici un exemple : {"tool_calls":[{"name":"get_time","arguments":{}}]}'
+def test_prose_avant_l_appel_devient_le_contenu():
+    """Le modèle annonce souvent son geste avant le JSON : la prose est gardée, l'appel exécuté."""
+    texte = 'Je vais lire le fichier :\n{"tool_calls":[{"name":"get_time","arguments":{}}]}'
+    contenu, appels = vp.extraire_appels(texte, OUTILS)
+    assert contenu == "Je vais lire le fichier :"
+    assert appels[0]["function"]["name"] == "get_time"
+
+
+def test_exemple_cite_avec_outil_inconnu_reste_du_texte():
+    texte = 'Voici un exemple : {"tool_calls":[{"name":"inconnu","arguments":{}}]}'
     contenu, appels = vp.extraire_appels(texte, OUTILS)
     assert appels is None and contenu == texte
+
+
+def test_refus_outils_reconnait_tool_not_found():
+    assert vp.refus_outils("Résumé : tous répondent « Tool not found ».")
+    assert vp.refus_outils("Il n'y a pas d'outil bash dans cette conversation.")
+    assert vp.refus_outils("No tool available here.")
+    assert not vp.refus_outils("Voici le résultat : 3 lignes.")
+
+
+def test_rappeler_correction_ajoute_la_consigne_sans_muter():
+    corps = vp.construire_corps_venice("kimi-k2-5", [{"role": "user", "content": "x"}], OUTILS, {})
+    corrige = vp.rappeler_correction(corps, OUTILS)
+    assert "CORRECTION" in corrige["systemPrompt"]
+    assert "get_time" in corrige["systemPrompt"]
+    assert "CORRECTION" in corrige["prompt"][-1]["content"]
+    assert "CORRECTION" not in corps["systemPrompt"]
 
 
 # --- Consigne d'outils, liste blanche, limiteur, suivi des crédits (28/10/2026) -------------------------------------------
@@ -579,3 +673,111 @@ def test_liste_des_modeles_gratuits_sans_doublon_et_sans_modele_a_pieces():
     assert {"qwen-3-8-27b", "kimi-k2-5", "deepseek-v4-1-flash-uncensored", "gemma4-uncensored"} <= set(ids)
     assert "zai-org-glm-5-2" not in ids
     assert {m["id"]: m["owned_by"] for m in vp.lister_modeles()}["kimi-k2-5"] == "venice-agent"
+
+
+# --- Flux au fil de l'eau (29/10/2026) -----------------------------------------------------------------------------------
+
+class _JetonVide:
+    def obtenir(self):
+        return "j"
+
+    def etat(self):
+        return {"cookie_ok": True}
+
+
+def test_deltas_agent_omet_le_raisonnement_et_rend_les_jetons():
+    etat = {"jetons": 0}
+    assert list(vp.deltas_agent(FLUX_AGENT, etat)) == ["o", "k é"]
+    assert etat["jetons"] == 15024
+
+
+def test_flux_sse_relaie_un_morceau_avant_la_fin(monkeypatch):
+    """Preuve du vrai flux : le client lit le premier morceau alors que Venice n'a pas fini."""
+    import threading
+    import urllib.request
+    suite = threading.Event()
+
+    def faux_discuter(jeton, corps):
+        def lignes():
+            yield '{"kind":"content","content":"premier"}'
+            assert suite.wait(5), "le client n'a rien reçu avant la fin du flux"
+            yield '{"kind":"content","content":"second"}'
+        return lignes()
+
+    monkeypatch.setattr(vp, "discuter", faux_discuter)
+    srv = vp.ServeurPont(("127.0.0.1", 0), vp.fabriquer_handler(_JetonVide(), "cle"))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        corps = json.dumps({"model": "qwen-3-8-27b", "messages": [{"role": "user", "content": "x"}],
+                            "stream": True}).encode()
+        req = urllib.request.Request(f"http://127.0.0.1:{srv.server_address[1]}/v1/chat/completions",
+                                     data=corps, headers={"Authorization": "Bearer cle",
+                                                          "Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            debut = b""
+            for _ in range(3):  # le premier morceau arrive dans les 3 premières lignes (rôle puis contenu)
+                debut += r.readline()
+                if b"premier" in debut:
+                    break
+            assert b"premier" in debut
+            suite.set()
+            reste = r.read()
+        assert b"second" in reste and b"[DONE]" in reste
+    finally:
+        srv.shutdown()
+
+
+def test_flux_sse_garde_l_analyse_des_outils(monkeypatch):
+    """Avec des outils, la réponse reste mise en tampon : le JSON d'appel doit être parsé avant l'envoi."""
+    import threading
+    import urllib.request
+    appel = json.dumps({"tool_calls": [{"name": "get_time", "arguments": {}}]})
+
+    def faux_discuter(jeton, corps):
+        return iter([json.dumps({"kind": "content", "content": appel})])
+
+    monkeypatch.setattr(vp, "discuter", faux_discuter)
+    srv = vp.ServeurPont(("127.0.0.1", 0), vp.fabriquer_handler(_JetonVide(), "cle"))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        corps = json.dumps({"model": "qwen-3-8-27b", "messages": [{"role": "user", "content": "heure ?"}],
+                            "tools": OUTILS, "stream": True}).encode()
+        req = urllib.request.Request(f"http://127.0.0.1:{srv.server_address[1]}/v1/chat/completions",
+                                     data=corps, headers={"Authorization": "Bearer cle",
+                                                          "Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            brut = r.read().decode()
+        assert '"tool_calls"' in brut and "get_time" in brut
+    finally:
+        srv.shutdown()
+
+
+def test_relance_corrective_quand_le_modele_croit_n_avoir_aucun_outil(monkeypatch):
+    """La route agents fait parfois appeler les outils natifs de Venice (« Tool not found ») : on relance une fois."""
+    import threading
+    import urllib.request
+    reponses = iter([("Il n'y a pas d'outil disponible. Tool not found.", 10),
+                     ('{"tool_calls":[{"name":"get_time","arguments":{}}]}', 20)])
+    corps_envoyes = []
+
+    def faux_discuter_agent(jeton, modele, corps):
+        corps_envoyes.append(corps)
+        return next(reponses)
+
+    monkeypatch.setattr(vp, "discuter_agent", faux_discuter_agent)
+    srv = vp.ServeurPont(("127.0.0.1", 0), vp.fabriquer_handler(_JetonVide(), "cle"))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        corps = json.dumps({"model": "kimi-k2-5", "messages": [{"role": "user", "content": "heure ?"}],
+                            "tools": OUTILS}).encode()
+        req = urllib.request.Request(f"http://127.0.0.1:{srv.server_address[1]}/v1/chat/completions",
+                                     data=corps, headers={"Authorization": "Bearer cle",
+                                                          "Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            rep = json.loads(r.read())
+        assert rep["choices"][0]["finish_reason"] == "tool_calls"
+        assert rep["choices"][0]["message"]["tool_calls"][0]["function"]["name"] == "get_time"
+        assert len(corps_envoyes) == 2
+        assert "CORRECTION" in corps_envoyes[1]["systemPrompt"]
+    finally:
+        srv.shutdown()

@@ -382,7 +382,10 @@ claude
 # Confier l'ÉCRITURE du code à DeepSeek V4.1 Flash Uncensored (gratuit, ~500k de contexte) : une fois pour toutes,
 # l'outil MCP (la clé est lue dans le fichier de secrets, jamais copiée) puis la consigne qui dit de s'en servir.
 claude mcp add -e VENICE_PONT_URL={u} -e VENICE_PONT_ENV={p['env']} --scope user deepseek -- python3 {ICI}/venice-mcp
-cat {ICI}/gabarits/claude-code/CLAUDE.deepseek.md >> ~/.claude/CLAUDE.md   # ou >> CLAUDE.md d'un seul projet
+# Au choix : sur demande partout (« utilise venice » ou /venice bascule la session, « arrête venice » revient)…
+cat {ICI}/gabarits/claude-code/CLAUDE.venice-mode.md >> ~/.claude/CLAUDE.md
+mkdir -p ~/.claude/commands && cp {ICI}/gabarits/claude-code/commands/venice.md ~/.claude/commands/
+# …ou toujours, dans un projet : cat {ICI}/gabarits/claude-code/CLAUDE.deepseek.md >> CLAUDE.md
 export MCP_TOOL_TIMEOUT=1800000                         # une délégation avec tests peut durer quelques minutes""")
     elif n == "aider":
         print(f"""# aider n'utilise PAS d'appels d'outils : le modèle écrit ses modifications (blocs SEARCH/REPLACE) et aider

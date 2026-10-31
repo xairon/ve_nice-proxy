@@ -147,9 +147,26 @@ Variante **testée** via OmniRoute (28/10/2026, `claude -p … --model ven-kimi`
 
 Projet tiers (<https://github.com/musistudio/claude-code-router>), configuré dans `~/.claude-code-router/config.json` : un fournisseur dont `api_base_url` est l'URL **complète** `http://127.0.0.1:8700/v1/chat/completions`, `api_key` = clé du pont, `models: ["kimi-k2-5"]`, et un bloc `Router` qui désigne `"default": "venice,kimi-k2-5"` ; lancement par `ccr code`. Non essayé ici : préférez OmniRoute, déjà en place et testé.
 
-## aider (non testé)
+## aider (testé, recommandé pour DeepSeek et les gros dépôts)
 
-Selon la documentation d'aider : `OPENAI_API_BASE=http://127.0.0.1:8700/v1`, `OPENAI_API_KEY=<clé du pont>`, puis `aider --model openai/kimi-k2-5` (le préfixe `openai/` sélectionne le protocole chat completions de LiteLLM).
+aider n'envoie **aucun outil** : le modèle répond par des blocs SEARCH/REPLACE qu'aider applique. C'est ce qui débloque `deepseek-v4-1-flash-uncensored` (route agents, ~500k de contexte, gratuit) : avec des outils déclarés, la boucle d'agent de Venice intercepte ses appels natifs (« Tool not found »). `venice-setup harness aider` imprime la recette :
+
+```bash
+cp gabarits/aider/aider.model.metadata.json ~/.aider.model.metadata.json   # annonce la vraie fenêtre à aider
+export OPENAI_API_BASE=http://127.0.0.1:8700/v1
+export OPENAI_API_KEY=<clé du pont>
+aider --model openai/deepseek-v4-1-flash-uncensored --edit-format diff --map-tokens 4096 --no-show-model-warnings
+# ajoutez les fichiers à modifier ; --test-cmd "pytest -q" --auto-test pour boucler sur les tests
+```
+
+Essai réel du 31/10/2026 (aider 0.86.2, ce dépôt, renommage d'une fonction dans 3 fichiers, 263 tests) :
+
+| modèle | durée | contexte envoyé | tours | tests |
+|---|---|---|---|---|
+| deepseek-v4-1-flash-uncensored | 66 s | 109k jetons | 1 | 263/263 |
+| kimi-k2-5 | 137 s | 103k puis 105k | 2 | 263/263 |
+
+Aucune mention d'outil dans les journaux, 0 crédit. Les modèles du chat classique (GLM 4.7 Heretic, Venice Uncensored 1.2, Gemma 4 Uncensored) marchent aussi avec aider, mais restent plafonnés à ~36k de contexte.
 
 ## Continue (non testé)
 

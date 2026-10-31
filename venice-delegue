@@ -1,0 +1,246 @@
+#!/usr/bin/env python3
+"""venice-delegue : confier une tâche à un modèle du pont SANS outils, puis appliquer et vérifier sa réponse.
+
+Pourquoi : sur la route agents de Venice, DeepSeek V4.1 Flash appelle les outils en natif et la boucle d'agent de
+Venice les refuse (« Tool not found »). Sans outil déclaré, il n'y a rien à intercepter : on lui donne les fichiers
+dans le message, il répond par des blocs de modification, et c'est ce programme qui les applique et lance les tests.
+
+    venice-delegue "Corrige le bogue de calcul" -f boutique/panier.py -f tests/test_panier.py --test "pytest -q"
+    venice-delegue "Résume ce module" -f module.py --format texte
+    venice-delegue "Extrais les fonctions publiques" -f module.py --format json
+
+Formats : `modifs` (défaut, blocs chercher/remplacer appliqués aux fichiers), `texte` (réponse affichée),
+`json` (réponse validée, affichée). Avec --test, les échecs sont renvoyés au modèle (--tours, 3 par défaut).
+Connexion : VENICE_PONT_URL (défaut http://127.0.0.1:8700/v1) et VENICE_PONT_CLE (jamais affichée).
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+MODELE_DEFAUT = "deepseek-v4-1-flash-uncensored"
+URL_DEFAUT = "http://127.0.0.1:8700/v1"
+SORTIE_TEST_MAX = 6000  # caractères de sortie de test renvoyés au modèle
+
+CONSIGNE_MODIFS = """Tu modifies des fichiers de code. Tu n'as AUCUN outil : n'en appelle aucun, ne demande pas à lire \
+d'autres fichiers. Tout ce dont tu disposes est dans ce message.
+
+Réponds UNIQUEMENT par des blocs de modification, un par changement, de cette forme exacte :
+
+chemin/du/fichier.py
+<<<<<<< SEARCH
+lignes existantes à remplacer, recopiées À L'IDENTIQUE (indentation comprise)
+=======
+nouvelles lignes
+>>>>>>> REPLACE
+
+Règles :
+- le chemin est relatif, seul sur sa ligne juste avant le bloc ;
+- la partie SEARCH doit exister telle quelle dans le fichier et être assez longue pour être unique ;
+- pour créer un fichier, laisse la partie SEARCH vide ;
+- plusieurs blocs pour un même fichier sont permis ;
+- aucun autre texte n'est nécessaire."""
+
+CONSIGNE_JSON = "Réponds UNIQUEMENT par un document JSON valide, sans texte autour ni bloc de code. Tu n'as aucun outil."
+CONSIGNE_TEXTE = "Tu n'as aucun outil : réponds directement, à partir de ce qui est dans ce message."
+
+_PENSEE = re.compile(r"<think>.*?</think>", re.S)
+_BLOC = re.compile(
+    r"^(?P<chemin>[^\n`<>=]+?)[ \t]*\n(?:```[^\n]*\n)?<<<<<<< SEARCH[ \t]*\n(?P<avant>.*?)^=======[ \t]*\n"
+    r"(?P<apres>.*?)^>>>>>>> REPLACE[ \t]*$", re.S | re.M)
+
+
+class Erreur(Exception):
+    pass
+
+
+# --- Blocs de modification ------------------------------------------------------------------------------------
+
+def extraire_blocs(texte: str) -> list[tuple[str, str, str]]:
+    """Réponse du modèle -> [(chemin, avant, après)] dans l'ordre."""
+    texte = _PENSEE.sub("", texte)
+    blocs = []
+    for m in _BLOC.finditer(texte):
+        chemin = m.group("chemin").strip().strip("`*").strip()
+        chemin = re.sub(r"^(?:FICHIER|Fichier|File|file)\s*:\s*", "", chemin)
+        blocs.append((chemin, m.group("avant"), m.group("apres")))
+    return blocs
+
+
+def chemin_sur(racine: Path, chemin: str) -> Path:
+    """Chemin dans `racine`, sinon Erreur (un modèle ne doit jamais écrire ailleurs)."""
+    p = (racine / chemin).resolve()
+    if not p.is_relative_to(racine.resolve()):
+        raise Erreur(f"chemin hors du dossier de travail refusé : {chemin}")
+    return p
+
+
+def _remplacer(contenu: str, avant: str, apres: str) -> str | None:
+    """Remplace la première occurrence de `avant` ; tolère des espaces de fin de ligne différents. None si absent."""
+    if avant in contenu:
+        return contenu.replace(avant, apres, 1)
+    lignes, cherche = contenu.splitlines(keepends=True), avant.splitlines()
+    nettes = [ligne.rstrip() for ligne in cherche]
+    for i in range(len(lignes) - len(cherche) + 1):
+        if [ligne.rstrip() for ligne in lignes[i:i + len(cherche)]] == nettes:
+            fin = "" if apres.endswith("\n") or not apres else "\n"
+            return "".join(lignes[:i]) + apres + fin + "".join(lignes[i + len(cherche):])
+    return None
+
+
+def appliquer(racine: Path, blocs, essai: bool = False) -> tuple[list[str], list[str]]:
+    """Applique les blocs. Renvoie (fichiers modifiés, échecs lisibles). `essai` : rien n'est écrit."""
+    modifies, echecs, contenus = [], [], {}
+    for chemin, avant, apres in blocs:
+        try:
+            p = chemin_sur(racine, chemin)
+        except Erreur as e:
+            echecs.append(str(e))
+            continue
+        actuel = contenus.get(p, p.read_text() if p.exists() else None)
+        if not avant.strip():
+            nouveau = apres if actuel is None else actuel + ("" if actuel.endswith("\n") else "\n") + apres
+        elif actuel is None:
+            echecs.append(f"{chemin} : fichier introuvable")
+            continue
+        else:
+            nouveau = _remplacer(actuel, avant, apres)
+            if nouveau is None:
+                echecs.append(f"{chemin} : partie SEARCH introuvable :\n{avant[:400]}")
+                continue
+        contenus[p] = nouveau
+        if chemin not in modifies:
+            modifies.append(chemin)
+    if not essai:
+        for p, texte in contenus.items():
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(texte)
+    return modifies, echecs
+
+
+# --- Modèle ---------------------------------------------------------------------------------------------------
+
+def demander(url: str, cle: str, modele: str, messages: list[dict], delai: float = 600) -> str:
+    corps = json.dumps({"model": modele, "messages": messages, "stream": False}).encode()
+    req = urllib.request.Request(url.rstrip("/") + "/chat/completions", data=corps, method="POST",
+                                 headers={"Content-Type": "application/json", "Authorization": f"Bearer {cle}"})
+    try:
+        with urllib.request.urlopen(req, timeout=delai) as r:
+            rep = json.load(r)
+    except urllib.error.HTTPError as e:
+        raise Erreur(f"le pont a répondu {e.code} : {e.read()[:300].decode(errors='replace')}") from None
+    except OSError as e:
+        raise Erreur(f"pont injoignable sur {url} ({e})") from None
+    return _PENSEE.sub("", (rep["choices"][0]["message"].get("content") or "")).strip()
+
+
+def presenter_fichiers(racine: Path, chemins: list[str]) -> str:
+    parts = []
+    for c in chemins:
+        p = chemin_sur(racine, c)
+        texte = p.read_text() if p.exists() else "(fichier absent : à créer si besoin)\n"
+        parts.append(f"{c}\n```\n{texte}{'' if texte.endswith(chr(10)) else chr(10)}```")
+    return "\n\n".join(parts)
+
+
+def lancer_test(commande: str, racine: Path) -> tuple[bool, str]:
+    r = subprocess.run(commande, shell=True, cwd=racine, capture_output=True, text=True, timeout=900)
+    sortie = (r.stdout + r.stderr)[-SORTIE_TEST_MAX:]
+    return r.returncode == 0, sortie
+
+
+def _json(texte: str):
+    m = re.match(r"^```(?:json)?\s*(.*?)\s*```$", texte.strip(), re.S)
+    return json.loads(m.group(1) if m else texte)
+
+
+# --- Boucle ---------------------------------------------------------------------------------------------------
+
+def deleguer(a, url: str, cle: str, journal=sys.stderr) -> int:
+    racine = Path(a.racine).resolve()
+    if a.format == "modifs":
+        systeme = CONSIGNE_MODIFS
+    else:
+        systeme = CONSIGNE_JSON if a.format == "json" else CONSIGNE_TEXTE
+    messages = [{"role": "system", "content": systeme},
+                {"role": "user", "content": f"Tâche : {a.consigne}\n\nFichiers :\n\n{presenter_fichiers(racine, a.fichier)}"
+                 if a.fichier else f"Tâche : {a.consigne}"}]
+    touches: list[str] = []
+    for tour in range(1, a.tours + 1):
+        reponse = demander(url, cle, a.modele, messages)
+        messages.append({"role": "assistant", "content": reponse})
+        if a.format == "texte":
+            print(reponse)
+            return 0
+        if a.format == "json":
+            try:
+                print(json.dumps(_json(reponse), ensure_ascii=False, indent=2))
+                return 0
+            except ValueError as e:
+                print(f"[tour {tour}] JSON invalide ({e}), nouvel essai", file=journal)
+                messages.append({"role": "user", "content": f"Ce n'est pas du JSON valide ({e}). {CONSIGNE_JSON}"})
+                continue
+        blocs = extraire_blocs(reponse)
+        if not blocs:
+            print(f"[tour {tour}] aucun bloc de modification dans la réponse", file=journal)
+            messages.append({"role": "user", "content": "Ta réponse ne contient aucun bloc. " + CONSIGNE_MODIFS})
+            continue
+        modifies, echecs = appliquer(racine, blocs, essai=a.dry_run)
+        touches += [m for m in modifies if m not in touches]
+        print(f"[tour {tour}] {len(blocs)} bloc(s), modifiés : {', '.join(modifies) or 'aucun'}"
+              + (f", {len(echecs)} échec(s)" if echecs else ""), file=journal)
+        if a.dry_run:
+            print(reponse)
+            return 0 if not echecs else 1
+        retour = []
+        if echecs:
+            retour.append("Ces blocs n'ont pas pu être appliqués :\n" + "\n\n".join(echecs))
+        if a.test:
+            ok, sortie = lancer_test(a.test, racine)
+            print(f"[tour {tour}] test {'OK' if ok else 'en échec'}", file=journal)
+            if ok and not echecs:
+                print(f"Terminé : {', '.join(touches)}", file=journal)
+                return 0
+            if not ok:
+                retour.append(f"Les tests échouent encore (`{a.test}`) :\n```\n{sortie}\n```")
+        elif not echecs:
+            print(f"Terminé : {', '.join(touches)}", file=journal)
+            return 0
+        actuels = presenter_fichiers(racine, sorted(set(a.fichier) | set(touches)))
+        messages.append({"role": "user", "content": "\n\n".join(retour) + f"\n\nÉtat actuel des fichiers :\n\n{actuels}"
+                         "\n\nCorrige avec de nouveaux blocs de modification."})
+    print(f"Abandon après {a.tours} tour(s).", file=journal)
+    return 1
+
+
+def main(argv=None) -> int:
+    p = argparse.ArgumentParser(prog="venice-delegue", description=__doc__.split("\n\n")[0])
+    p.add_argument("consigne", help="la tâche, en langage naturel")
+    p.add_argument("-f", "--fichier", action="append", default=[], help="fichier donné au modèle (répétable)")
+    p.add_argument("-m", "--modele", default=os.environ.get("VENICE_DELEGUE_MODELE", MODELE_DEFAUT))
+    p.add_argument("--format", choices=("modifs", "texte", "json"), default="modifs")
+    p.add_argument("--test", help="commande de vérification, lancée dans --racine (ex. \"pytest -q\")")
+    p.add_argument("--tours", type=int, default=3, help="nombre maximal d'allers-retours avec le modèle")
+    p.add_argument("--racine", default=".", help="dossier de travail ; aucune écriture en dehors")
+    p.add_argument("--dry-run", action="store_true", help="affiche la réponse sans rien écrire")
+    a = p.parse_args(argv)
+    cle = os.environ.get("VENICE_PONT_CLE")
+    if not cle:
+        print("VENICE_PONT_CLE manquante (la clé du pont, dans son fichier de secrets).", file=sys.stderr)
+        return 2
+    try:
+        return deleguer(a, os.environ.get("VENICE_PONT_URL", URL_DEFAUT), cle)
+    except Erreur as e:
+        print(f"Erreur : {e}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

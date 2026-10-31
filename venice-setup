@@ -317,7 +317,8 @@ HARNAIS = {
     "omniroute": ("TESTÉ (fournisseur custom + alias, v3.8.52)", None),
     "hermes": ("TESTÉ via OmniRoute (fournisseur omniroute-ven) ; branchement direct sur le pont : format conforme à Hermes v0.22, non lancé", None),
     "openwebui": ("TESTÉ via OmniRoute (Open WebUI v0.11.4, connexion OpenAI) ; branchement direct sur le pont : même réglage, non lancé", None),
-    "aider": ("NON TESTÉ (installation impossible ici : Python 3.13, dépendances sans roue)", None),
+    "aider": ("TESTÉ en direct contre Venice (aider 0.86.2, 31/10/2026) : deepseek-v4-1-flash-uncensored sur un dépôt "
+              "de 109k jetons, renommage transversal en 66 s, 263 tests verts, sans outils, 0 crédit", None),
     "cline": ("NON TESTÉ", None),
     "continue": ("NON TESTÉ", None),
     "codex": ("TESTÉ via OmniRoute (ven-kimi) ; direct sur le pont (/v1/responses, 31/10/2026) : vérifié avec le SDK OpenAI "
@@ -333,7 +334,8 @@ def cmd_harness(a) -> int:
     if n not in HARNAIS:
         raise Erreur(f"Harnais inconnu. Disponibles : {', '.join(HARNAIS)}")
     print(f"# {n} : {HARNAIS[n][0]}\n# Pont : {url_pont(p)}  (clé : VENICE_PONT_CLE dans {p['env']})")
-    u, m = url_pont(p), a.modele
+    u = url_pont(p)
+    m = a.modele or ("deepseek-v4-1-flash-uncensored" if n == "aider" else "kimi-k2-5")
     if n == "opencode":
         if a.appliquer:
             appliquer_opencode(p, m, a.dry_run)
@@ -376,6 +378,16 @@ export ANTHROPIC_DEFAULT_HAIKU_MODEL=qwen-3-8-27b       # tâches de fond (titre
 export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1       # moins de requêtes annexes : le pont plafonne à 20/min
 claude
 # Variante OmniRoute (testée) : ANTHROPIC_BASE_URL=http://127.0.0.1:20128, ANTHROPIC_API_KEY=$OMNIROUTE_CLE, --model ven-kimi.""")
+    elif n == "aider":
+        print(f"""# aider n'utilise PAS d'appels d'outils : le modèle écrit ses modifications (blocs SEARCH/REPLACE) et aider
+# les applique. C'est ce qui permet DeepSeek V4.1 Flash (route agents, ~500k de contexte) : avec des outils, la boucle
+# d'agent de Venice intercepte ses appels natifs (« Tool not found »). Le fichier de réglages annonce la vraie fenêtre
+# à aider, qui se croirait sinon limité ; les modèles du chat classique restent plafonnés à ~36k.
+cp {ICI}/gabarits/aider/aider.model.metadata.json ~/.aider.model.metadata.json
+export OPENAI_API_BASE={u}
+export OPENAI_API_KEY="$(grep ^VENICE_PONT_CLE= {p['env']} | cut -d= -f2-)"
+aider --model openai/{m} --edit-format diff --map-tokens 4096 --no-show-model-warnings
+# Avec tests : --test-cmd "pytest -q" --auto-test ; ajoutez au lancement les fichiers à modifier.""")
     else:
         print(f"URL de base : {u}\nClé API : VENICE_PONT_CLE\nModèle : {m}\n# Réglage générique « OpenAI-compatible » de {n}.")
     return 0
@@ -449,7 +461,7 @@ def construire_parseur() -> argparse.ArgumentParser:
     s = sous("install", cmd_install, "installer le pont comme service utilisateur systemd"); s.add_argument("--dry-run", action="store_true")
     s = sous("uninstall", cmd_uninstall, "retirer le service"); s.add_argument("--purger", action="store_true"); s.add_argument("--dry-run", action="store_true")
     s = sous("harness", cmd_harness, "configuration pour un client")
-    s.add_argument("nom"); s.add_argument("--modele", default="kimi-k2-5"); s.add_argument("--appliquer", action="store_true"); s.add_argument("--dry-run", action="store_true")
+    s.add_argument("nom"); s.add_argument("--modele", default=None); s.add_argument("--appliquer", action="store_true"); s.add_argument("--dry-run", action="store_true")
     sous("profils", cmd_profils, "lister les profils")
     return ap
 

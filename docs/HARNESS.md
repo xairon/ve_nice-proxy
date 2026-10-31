@@ -5,7 +5,8 @@
 Deux familles :
 
 - **Directs sur le pont** (`http://127.0.0.1:8700/v1`, clé = `VENICE_PONT_CLE`) : tout client qui parle *chat completions*.
-- **Via OmniRoute** ([OMNIROUTE.md](OMNIROUTE.md)) : nécessaire pour les clients qui parlent un autre format (Codex CLI : *Responses* ; Claude Code : *Messages* d'Anthropic) ou pour mettre alias, clés et plafonds par client.
+- **Directs sur le pont, autres formats** : Claude Code (*Messages* d'Anthropic, `http://127.0.0.1:8700`) et Codex CLI (*Responses*, `http://127.0.0.1:8700/v1`), depuis le 31/10/2026.
+- **Via OmniRoute** ([OMNIROUTE.md](OMNIROUTE.md)) : pour mettre alias, clés et plafonds par client.
 
 | Client | État (28/10/2026) | Chemin |
 |---|---|---|
@@ -14,9 +15,9 @@ Deux familles :
 | OmniRoute 3.8.52 | **TESTÉ** (fournisseur `openai-compatible` + alias) | pont → OmniRoute |
 | Hermes Agent v0.22.2 | **TESTÉ via OmniRoute** ; branchement direct : format conforme au schéma de config, non lancé | OmniRoute |
 | Open WebUI v0.11.4 | **TESTÉ via OmniRoute** (authentification vérifiée, chat réel) ; direct sur le pont : même réglage, non lancé | OmniRoute |
-| Codex CLI 0.162.1 | **TESTÉ via OmniRoute uniquement** (`codex exec`, réponse `pong` sur `ven-kimi`) | OmniRoute (`/v1/responses`) |
-| Claude Code 2.1.312 | **TESTÉ via OmniRoute uniquement** (`claude -p`, `pong` sur `ven-kimi`). Sur `ven-qwen-nc` le prompt est tronqué : réponse hors sujet | OmniRoute (`/v1/messages`) |
-| claude-code-router | **NON TESTÉ** (alternative à OmniRoute ; voir ci-dessous) | pont direct |
+| Codex CLI 0.162.1 | **TESTÉ via OmniRoute** (`codex exec`, `pong` sur `ven-kimi`) ; **direct** (`/v1/responses`, 31/10/2026) : vérifié avec le SDK OpenAI, Codex lui-même **non lancé** | pont direct, ou OmniRoute |
+| Claude Code 2.1.316 | **TESTÉ en direct** (31/10/2026, `/v1/messages` : appel `Write` émulé, fichier écrit ; réponses du modèle simulées) ; **TESTÉ via OmniRoute** (2.1.312, `pong` sur `ven-kimi`) | pont direct, ou OmniRoute |
+| claude-code-router | **NON TESTÉ** (plus nécessaire : le pont parle `/v1/messages`) | pont direct |
 | aider | **NON TESTÉ** : installation impossible sur la machine d'essai (Python 3.13, dépendances sans roue précompilée) | pont direct |
 | Cline, Continue | **NON TESTÉ** (extensions d'éditeur, non installées) | pont direct |
 
@@ -104,36 +105,43 @@ Images, voix et dictée : Administration > Paramètres > Images (moteur OpenAI, 
 
 *Réglages > Connexions > OpenAI > +* : URL `http://127.0.0.1:20128/v1` (OmniRoute) ou `http://127.0.0.1:8700/v1` (pont), clé correspondante, puis filtrer la liste de modèles. Avec Docker en réseau hôte (`network_mode: host`), `127.0.0.1` désigne bien la machine ; en réseau pont, utiliser l'adresse de l'hôte. Recommandations (testées dans notre déploiement) : **authentification activée** (`WEBUI_AUTH=True`, `ENABLE_SIGNUP=False`), titres/tags/suggestions automatiques **coupés** (ils consomment votre plafond de requêtes), `mem_limit` posé.
 
-## Codex CLI (via OmniRoute)
+## Codex CLI (direct sur le pont)
 
-Codex CLI exige l'API *Responses* (`wire_api = "chat"` a été retiré début 2026 d'après la documentation de la communauté et des guides tiers, non confirmé par une source OpenAI primaire). Le pont n'expose que *chat completions* ; OmniRoute traduit `/v1/responses` vers lui.
+Codex CLI exige l'API *Responses*. Le pont l'expose depuis le 31/10/2026 (`/v1/responses`, flux compris) : outils `function`, outils `custom` à entrée libre (`apply_patch`) et `local_shell` sont traduits ; les outils hébergés par OpenAI (`web_search`…) sont ignorés.
 
 ```toml
-# ~/.codex/config.toml
-model_provider = "omniroute"
-model = "ven-kimi"
-[model_providers.omniroute]
-name = "OmniRoute"
-base_url = "http://127.0.0.1:20128/v1"
-env_key = "OMNIROUTE_CLE"
+# ~/.codex/config.toml   (./venice-setup harness codex l'affiche avec votre adresse)
+model_provider = "venice"
+model = "kimi-k2-5"
+[model_providers.venice]
+name = "Venice (pont local)"
+base_url = "http://127.0.0.1:8700/v1"
+env_key = "VENICE_PONT_CLE"
 wire_api = "responses"
 ```
 
-Testé : `OMNIROUTE_CLE=… codex exec --skip-git-repo-check -s read-only "Réponds uniquement par le mot: pong"` → `pong`. Avertissement bénin : « Model metadata for `ven-kimi` not found » (Codex ne connaît pas l'alias). Le `CODEX_HOME` était un dossier jetable.
+État : **vérifié avec le SDK OpenAI** (`responses.create` et `responses.stream`, appels de fonction compris) et par les tests du pont ; **Codex CLI lui-même n'a pas encore été lancé en direct**. Un nom `gpt-*` / `codex-*` est réécrit vers `kimi-k2-5` (voir les alias dans [OUTILS.md](OUTILS.md)). Avertissement bénin attendu : « Model metadata … not found ».
 
-## Claude Code (via OmniRoute)
+Variante **testée** via OmniRoute (28/10/2026, `codex exec` → `pong`) : `base_url = "http://127.0.0.1:20128/v1"`, `env_key = "OMNIROUTE_CLE"`, `model = "ven-kimi"`.
 
-OmniRoute expose `/v1/messages` (format Anthropic) et le traduit vers Venice :
+## Claude Code (direct sur le pont)
+
+Le pont expose l'API *Messages* d'Anthropic (`/v1/messages`, `/v1/messages/count_tokens`, flux SSE au format Anthropic, blocs `tool_use` / `tool_result`, images, clé lue dans `x-api-key` ou `Authorization`).
 
 ```bash
-export ANTHROPIC_BASE_URL=http://127.0.0.1:20128
-export ANTHROPIC_API_KEY="$OMNIROUTE_CLE"
-claude --model ven-kimi
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8700            # sans /v1
+export ANTHROPIC_API_KEY="$VENICE_PONT_CLE"
+export ANTHROPIC_MODEL=kimi-k2-5
+export ANTHROPIC_DEFAULT_HAIKU_MODEL=qwen-3-8-27b          # tâches de fond
+export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1          # moins de requêtes annexes (plafond de 20/min)
+claude
 ```
 
-Testé : `claude -p "Réponds uniquement par le mot: pong" --model ven-kimi --tools ""` → `pong` (avec un `CLAUDE_CONFIG_DIR` jetable). Claude Code avertit que le modèle est inconnu et suppose 200k de contexte : les alias à grande fenêtre (Kimi 262k) conviennent ; **le prompt de Claude Code dépasse 39k jetons : sur `ven-qwen-nc` il est tronqué en silence et la réponse est hors sujet** (essai du 28/10/2026 : réponse sans rapport avec la demande).
+Testé (31/10/2026) : **Claude Code 2.1.316** en `claude -p "Crée bonjour.txt contenant salut" --allowedTools Write`, pont réel, **réponses du modèle simulées** (pas d'accès à Venice depuis la machine d'essai) : Claude Code a reçu l'appel `Write` émulé, écrit le fichier, renvoyé le résultat, puis affiché la réponse finale. Le prompt système de Claude Code (outils compris) pesait ~74 000 caractères, d'où le choix de `kimi-k2-5` : sur le chat classique, la garde de contexte du pont refuse vite avec « prompt is too long » (au lieu de la troncature silencieuse qui donnait des réponses hors sujet le 28/10/2026). Sans `ANTHROPIC_MODEL`, les noms `claude-*` sont réécrits vers `kimi-k2-5` (et `claude-*haiku*` vers `qwen-3-8-27b`).
 
-### claude-code-router (non testé)
+Variante **testée** via OmniRoute (28/10/2026, `claude -p … --model ven-kimi` → `pong`) : `ANTHROPIC_BASE_URL=http://127.0.0.1:20128`, `ANTHROPIC_API_KEY="$OMNIROUTE_CLE"`.
+
+### claude-code-router (non testé, plus nécessaire)
 
 Projet tiers (<https://github.com/musistudio/claude-code-router>), configuré dans `~/.claude-code-router/config.json` : un fournisseur dont `api_base_url` est l'URL **complète** `http://127.0.0.1:8700/v1/chat/completions`, `api_key` = clé du pont, `models: ["kimi-k2-5"]`, et un bloc `Router` qui désigne `"default": "venice,kimi-k2-5"` ; lancement par `ccr code`. Non essayé ici : préférez OmniRoute, déjà en place et testé.
 

@@ -1,8 +1,12 @@
-"""Pont OpenAI -> Venice (chemin web) pour OmniRoute.
+"""Pont local vers Venice pour les clients d'IA et les agents de code.
 
-Le jeton Clerk (60 s) est miné depuis le cookie __client ; api.venice.ai le refuse (401),
-outerface.venice.ai l'accepte. Les outils sont émulés : définitions dans le prompt système,
-réponse JSON {"tool_calls": [...]} retransformée en tool_calls OpenAI.
+Formats servis : chat completions (OpenAI), Messages (Anthropic, Claude Code), Responses (OpenAI, Codex CLI) ;
+les deux derniers sont traduits par `formats.py` vers le cœur commun (`evenements_chat`).
+
+Chemin web : le jeton Clerk (60 s) est miné depuis le cookie __client ; api.venice.ai le refuse (401),
+outerface.venice.ai l'accepte. Les outils y sont émulés : définitions dans le prompt système, réponse
+(`{"tool_calls": [...]}`, `<tool_call>`, objet nu) retransformée en appels d'outil du format du client.
+Chemin API (facultatif, VENICE_API_KEY) : modèles `api/…` servis par api.venice.ai, outils natifs.
 """
 import base64
 import copy
@@ -31,6 +35,9 @@ from email import policy
 from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import formats  # noqa: E402  (traductions Anthropic et Responses, même dossier)
 
 CLERK = "https://clerk.venice.ai/v1"
 CLERK_VERSION = {"__clerk_api_version": "2025-04-10"}
@@ -728,19 +735,24 @@ def construire_corps_venice(modele, messages, outils, params, medias=None):
     medias = medias or MediasHorsLigne()
     # Comme le site : seules les images du dernier message qui en porte sont rejouées ; les anciennes sont écartées sans téléchargement.
     derniere = max((i for i, m in enumerate(messages) if contient_images([m])), default=-1)
-    systeme, prompt = [], []
+    systeme, prompt, noms_appels = [], [], {}
     for i, m in enumerate(messages):
         role, contenu = m.get("role"), m.get("content")
         contenu, images, fichiers = _decouper(contenu, medias, role == "user" and i == derniere)
         if len(images) > IMAGES_MAX:
             raise EntreeInvalide(f"trop d'images dans un message ({len(images)}, maximum {IMAGES_MAX} images)")
-        if role == "system":
+        if role in ("system", "developer"):
             systeme.append(contenu or "")
         elif role == "tool":
-            prompt.append({"role": "user", "content": f"Résultat de l'outil (appel {m.get('tool_call_id', '')}) : {contenu}"})
+            ident = m.get("tool_call_id", "")
+            nom = noms_appels.get(ident) or m.get("name")
+            quoi = f"{nom}, appel {ident}" if nom else f"appel {ident}"
+            prompt.append({"role": "user", "content": f"Résultat de l'outil ({quoi}) : {contenu}"})
         elif role == "assistant" and m.get("tool_calls"):
+            for tc in m["tool_calls"]:
+                noms_appels[tc.get("id", "")] = (tc.get("function") or {}).get("name")
             texte = "\n".join(_appel_en_texte(tc) for tc in m["tool_calls"])
-            prompt.append({"role": "assistant", "content": texte})
+            prompt.append({"role": "assistant", "content": f"{contenu}\n{texte}" if contenu else texte})
         else:
             item = {"role": role, "content": contenu or ""}
             if fichiers:  # format du site : le texte du fichier d'abord, puis la question
@@ -780,40 +792,160 @@ def construire_corps_venice(modele, messages, outils, params, medias=None):
 
 
 _PENSEE = re.compile(r"<think>.*?</think>", re.S)
+_PENSEE_OUVERTE = re.compile(r"^\s*<think>.*", re.S)  # réflexion coupée par max_tokens : rien d'exploitable
 _CLOTURE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.S)
-
-
 _DEBUT_APPEL = re.compile('[{] *"tool_calls" *:')
+# Formats d'appel que les modèles produisent d'eux-mêmes, en plus du format demandé :
+# <tool_call>{...}</tool_call> (Qwen, Hermes, GLM), {"name": ..., "arguments": ...} nu, bloc ```json.
+_BALISE_APPEL = re.compile(r"<tool_call>\s*(.*?)\s*(?:</tool_call>|$)", re.S)
+_DEBUT_OBJET_NOMME = re.compile(r'[{\[]\s*[{]?\s*"(?:name|function|tool)"\s*:')
+_CLOTURE_INTERNE = re.compile(r"```(?:json)?\s*([\[{].*?)\s*```", re.S)
+_VIRGULE_FINALE = re.compile(r",\s*([}\]])")
+
+
+def _decoder_json(texte):
+    """Premier objet JSON au début de `texte` : (objet, fin) ; répare virgules finales et accolades manquantes
+    (réponse coupée par max_tokens). ValueError si rien d'exploitable."""
+    texte = texte.lstrip()
+    try:
+        return json.JSONDecoder().raw_decode(texte)
+    except ValueError:
+        pass
+    repare = _VIRGULE_FINALE.sub(r"\1", texte)
+    try:
+        return json.JSONDecoder().raw_decode(repare)
+    except ValueError:
+        pass
+    # Fermer ce qui reste ouvert (hors chaînes) : un appel tronqué en fin de réponse reste exécutable.
+    pile, chaine, echap = [], False, False
+    for c in repare:
+        if chaine:
+            echap = (c == "\\") and not echap
+            if c == '"' and not echap:
+                chaine = False
+            continue
+        if c == '"':
+            chaine, echap = True, False
+        elif c in "{[":
+            pile.append("}" if c == "{" else "]")
+        elif c in "}]" and pile:
+            pile.pop()
+    if not pile:
+        raise ValueError("JSON illisible")
+    complete = repare + ('"' if chaine else "") + "".join(reversed(pile))
+    return json.JSONDecoder().raw_decode(_VIRGULE_FINALE.sub(r"\1", complete))
+
+
+def _normaliser_nom(nom, noms):
+    """Nom d'outil rapproché de la liste fournie : `functions.read`, `Read` -> `read`. None si inconnu."""
+    if not isinstance(nom, str):
+        return None
+    if nom in noms:
+        return nom
+    court = nom.split(".")[-1].split(":")[-1].strip()
+    if court in noms:
+        return court
+    bas = {n.lower(): n for n in noms if isinstance(n, str)}
+    return bas.get(court.lower())
+
+
+def _appel_brut(t, noms):
+    """Un appel sous l'une des formes vues ({name, arguments}, {function: {name, arguments}}, {tool, input}…)
+    -> (nom, arguments) ou None."""
+    if not isinstance(t, dict):
+        return None
+    f = t.get("function") if isinstance(t.get("function"), dict) else t
+    nom = _normaliser_nom(f.get("name") or (t.get("tool") if isinstance(t.get("tool"), str) else None)
+                          or (t.get("function") if isinstance(t.get("function"), str) else None), noms)
+    if not nom:
+        return None
+    for cle in ("arguments", "parameters", "input", "args"):
+        if cle in f:
+            args = f[cle]
+            break
+    else:
+        args = {}
+    if isinstance(args, str):
+        try:
+            json.loads(args)
+        except ValueError:
+            args = {"input": args}  # outil à entrée libre (patch brut) : on garde le texte
+    return nom, args if args is not None else {}
+
+
+def _liste_appels(obj, noms):
+    """Objet décodé -> liste de (nom, arguments) si TOUS les appels visent des outils connus, sinon None."""
+    if isinstance(obj, dict) and "tool_calls" in obj:
+        liste = obj["tool_calls"]
+    elif isinstance(obj, list):
+        liste = obj
+    else:
+        liste = [obj]
+    if not isinstance(liste, list) or not liste:
+        return None
+    appels = [_appel_brut(t, noms) for t in liste]
+    return appels if all(appels) else None
 
 
 def extraire_appels(texte, outils):
-    """(contenu, tool_calls) : tool_calls non None si le texte est un appel d'outil valide."""
+    """(contenu, tool_calls) : tool_calls non None si le texte contient un appel d'outil valide.
+
+    Formats reconnus, dans l'ordre : {"tool_calls": [...]} (demandé), <tool_call>{...}</tool_call> (un ou plusieurs),
+    {"name": ..., "arguments": ...} nu ou en liste, le tout éventuellement dans un bloc ```json. La prose avant l'appel
+    devient le contenu ; le texte après est écarté. Les noms sont vérifiés contre la liste fournie : un exemple cité
+    avec un outil inconnu reste du texte."""
     if not outils or not texte:
         return texte, None
     noms = {o.get("function", o).get("name") for o in outils}
     brut = _PENSEE.sub("", texte).strip()
+    if _PENSEE_OUVERTE.match(brut):
+        return texte, None
     m = _CLOTURE.match(brut)
     if m:
         brut = m.group(1)
-    # Le modèle annonce souvent son geste avant l'appel (« Je vais lire le fichier :\n{...} ») : on prend le
-    # premier objet {"tool_calls": …}. La liste blanche des noms empêche d'exécuter un exemple cité.
-    debut = _DEBUT_APPEL.search(brut)
-    prose = brut[:debut.start()].strip() if debut else ""
-    try:
-        obj, _fin = json.JSONDecoder().raw_decode(brut[debut.start():] if debut else brut)
-    except ValueError:
+    candidats = []  # (début de l'appel, liste d'appels)
+    balises = list(_BALISE_APPEL.finditer(brut))
+    if balises:
+        appels = []
+        for b in balises:
+            try:
+                obj, _ = _decoder_json(b.group(1))
+            except ValueError:
+                appels = None
+                break
+            liste = _liste_appels(obj, noms)
+            if not liste:
+                appels = None
+                break
+            appels += liste
+        if appels:
+            candidats.append((balises[0].start(), appels))
+    for motif in (_DEBUT_APPEL, _DEBUT_OBJET_NOMME):
+        for debut in motif.finditer(brut):
+            try:
+                obj, _ = _decoder_json(brut[debut.start():])
+            except ValueError:
+                continue
+            liste = _liste_appels(obj, noms)
+            if liste:
+                candidats.append((debut.start(), liste))
+                break
+    if not candidats:
+        m = _CLOTURE_INTERNE.search(brut)
+        if m:
+            try:
+                liste = _liste_appels(_decoder_json(m.group(1))[0], noms)
+            except ValueError:
+                liste = None
+            if liste:
+                candidats.append((m.start(), liste))
+    if not candidats:
         return texte, None
-    liste = obj.get("tool_calls") if isinstance(obj, dict) else None
-    if not liste or not all(isinstance(t, dict) and t.get("name") in noms for t in liste):
-        return texte, None
-    appels = []
-    for t in liste:
-        args = t.get("arguments", {})
-        appels.append({
-            "id": "call_" + uuid.uuid4().hex[:24],
-            "type": "function",
-            "function": {"name": t["name"], "arguments": args if isinstance(args, str) else json.dumps(args, ensure_ascii=False)},
-        })
+    debut, liste = min(candidats, key=lambda c: c[0])
+    prose = re.sub(r"```[a-z]*\s*$", "", brut[:debut]).strip()
+    appels = [{"id": "call_" + uuid.uuid4().hex[:24], "type": "function",
+               "function": {"name": nom, "arguments": args if isinstance(args, str) else json.dumps(args, ensure_ascii=False)}}
+              for nom, args in liste]
     return prose or None, appels
 
 
@@ -1031,6 +1163,491 @@ def lire_reponse(jeton, modele, corps):
     if est_agent(modele):
         return discuter_agent(jeton, modele, corps)
     return "".join(morceaux_contenu(discuter(jeton, corps))), 0
+
+
+# --- API officielle de Venice (facultative) --------------------------------------------------------------------------
+#
+# Avec une clé API (VENICE_API_KEY), les modèles préfixés `api/` passent par api.venice.ai : le chemin prévu par
+# Venice, conforme à ses CGU, facturé à l'usage. Les modèles qui annoncent `supportsFunctionCalling` reçoivent les
+# outils en natif (vrai tool calling, arguments en flux) ; les autres passent par la même émulation que le chemin web.
+# Sans cookie, toute requête passe par l'API (mode « API seule »).
+
+PREFIXE_API = "api/"
+API_OFFICIELLE = os.environ.get("VENICE_PONT_API_URL", "https://api.venice.ai/api/v1")
+CHAMPS_API = ("temperature", "top_p", "max_tokens", "max_completion_tokens", "stop", "seed", "frequency_penalty",
+              "presence_penalty", "response_format", "reasoning_effort", "logprobs", "top_logprobs", "n")
+
+
+def _image_depuis_base64(b64):
+    try:
+        mime = _type_image(base64.b64decode(b64[:64] + "=" * (-len(b64[:64]) % 4))) or "image/png"
+    except ValueError:
+        mime = "image/png"
+    return f"data:{mime};base64,{b64}"
+
+
+def messages_depuis_corps(corps):
+    """Corps du chat web (système + prompt, outils déjà émulés) -> messages OpenAI pour l'API officielle."""
+    messages = [{"role": "system", "content": corps["systemPrompt"]}] if corps.get("systemPrompt") else []
+    for m in corps.get("prompt") or []:
+        contenu = m.get("content") or ""
+        if m.get("imagePath"):
+            contenu = [{"type": "text", "text": contenu}] + [
+                {"type": "image_url", "image_url": {"url": _image_depuis_base64(b)}} for b in m["imagePath"]]
+        messages.append({"role": m.get("role", "user"), "content": contenu})
+    return messages
+
+
+def _appel_normalise(tc):
+    f = tc.get("function") or {}
+    args = f.get("arguments")
+    return {"id": tc.get("id") or "call_" + uuid.uuid4().hex[:24], "type": "function",
+            "function": {"name": f.get("name"), "arguments": args if isinstance(args, str) else json.dumps(args or {})}}
+
+
+class ApiVenice:
+    """Client de l'API officielle (clé `VENICE_API_KEY`)."""
+
+    DUREE_CATALOGUE = 3600
+
+    def __init__(self, cle, url=API_OFFICIELLE, horloge=time.time):
+        self.cle, self.url, self._horloge = cle, url.rstrip("/"), horloge
+        self._catalogue, self._lu = None, 0.0
+        self._verrou = threading.Lock()
+
+    def _entetes(self):
+        return {"Authorization": "Bearer " + self.cle, "User-Agent": "venice-pont"}
+
+    def catalogue(self):
+        """{id: modèle} des modèles texte de l'API (relu toutes les heures ; vide si l'API est injoignable)."""
+        with self._verrou:
+            if self._catalogue is None or self._horloge() - self._lu > self.DUREE_CATALOGUE:
+                self._lu = self._horloge()
+                try:
+                    r = requete("GET", self.url + "/models", params={"type": "text"}, headers=self._entetes(), timeout=20)
+                    if r.status_code == 200:
+                        self._catalogue = {m["id"]: m for m in r.json().get("data", []) if m.get("id")}
+                except (ErreurReseau, ValueError):
+                    pass
+                if self._catalogue is None:
+                    self._lu -= self.DUREE_CATALOGUE - 300  # échec : nouvel essai dans 5 minutes, pas à chaque requête
+                    return {}
+            return self._catalogue
+
+    def capacites(self, modele):
+        return ((self.catalogue().get(modele) or {}).get("model_spec") or {}).get("capabilities") or {}
+
+    def outils_natifs(self, modele):
+        return bool(self.capacites(modele).get("supportsFunctionCalling"))
+
+    def contexte(self, modele):
+        return ((self.catalogue().get(modele) or {}).get("model_spec") or {}).get("availableContextTokens")
+
+    def _poster(self, corps, flux):
+        for essai in range(3):
+            r = requete("POST", self.url + "/chat/completions", corps_json=corps, headers=self._entetes(),
+                        stream=flux, timeout=300)
+            if (r.status_code == 429 or r.status_code >= 500) and essai < 2:
+                r.close()
+                time.sleep(1 + essai)
+                continue
+            if r.status_code != 200:
+                detail = r.text[:300]
+                r.close()
+                statut = r.status_code if r.status_code in (400, 401, 402, 403, 404, 413, 429) else 502
+                raise ErreurVenice(statut, f"API Venice {r.status_code} : {detail}")
+            return r
+
+    def _corps(self, modele, messages, req, flux, outils=None):
+        corps = {"model": modele, "messages": messages, "stream": bool(flux),
+                 "venice_parameters": {"include_venice_system_prompt": bool(req.get("include_venice_system_prompt", False))}}
+        for cle in CHAMPS_API:
+            if cle in req:
+                corps[cle] = req[cle]
+        if outils:
+            corps["tools"] = outils
+            for cle in ("tool_choice", "parallel_tool_calls"):
+                if cle in req:
+                    corps[cle] = req[cle]
+        if flux:
+            corps["stream_options"] = {"include_usage": True}
+        return corps
+
+    @staticmethod
+    def _lignes_sse(r):
+        for ligne in r.iter_lines(decode_unicode=True):
+            if not ligne.startswith("data:"):
+                continue
+            donnee = ligne[5:].strip()
+            if donnee == "[DONE]":
+                return
+            try:
+                yield json.loads(donnee)
+            except ValueError:
+                continue
+
+    def evenements_natifs(self, modele, req, flux):
+        """Événements du cœur, outils en natif : la requête du client passe presque telle quelle."""
+        messages = [{k: v for k, v in m.items() if k in ("role", "content", "name", "tool_calls", "tool_call_id")}
+                    for m in req["messages"]]
+        corps = self._corps(modele, messages, req, flux, req.get("tools") or None)
+        r = self._poster(corps, flux)
+        if not flux:
+            d = r.json()
+            choix = (d.get("choices") or [{}])[0]
+            msg = choix.get("message") or {}
+            appels = [_appel_normalise(tc) for tc in msg.get("tool_calls") or []] or None
+            if msg.get("content"):
+                yield "texte", msg["content"]
+            if appels:
+                yield "appels", appels
+            yield "fin", {"raison": "tool_calls" if appels else (choix.get("finish_reason") or "stop"),
+                          "usage": d.get("usage") or usage_estime(msg.get("content"), appels)}
+            return
+        appels, usage, raison, textes = {}, None, None, []
+        try:
+            for d in self._lignes_sse(r):
+                usage = d.get("usage") or usage
+                for choix in d.get("choices") or []:
+                    delta = choix.get("delta") or {}
+                    if delta.get("content"):
+                        textes.append(delta["content"])
+                        yield "texte", delta["content"]
+                    for tc in delta.get("tool_calls") or []:
+                        a = appels.setdefault(tc.get("index", len(appels)), {"id": None, "name": "", "arguments": ""})
+                        a["id"] = tc.get("id") or a["id"]
+                        f = tc.get("function") or {}
+                        a["name"] += f.get("name") or ""
+                        a["arguments"] += f.get("arguments") or ""
+                    raison = choix.get("finish_reason") or raison
+        finally:
+            r.close()
+        liste = [_appel_normalise({"id": a["id"], "function": {"name": a["name"], "arguments": a["arguments"] or "{}"}})
+                 for _, a in sorted(appels.items())] or None
+        if liste:
+            yield "appels", _limiter_appels(liste, req)
+        yield "fin", {"raison": "tool_calls" if liste else (raison or "stop"),
+                      "usage": usage or usage_estime("".join(textes), liste)}
+
+    def morceaux_emules(self, modele, corps_web, etat):
+        """Texte en flux pour un modèle sans tool calling natif (outils déjà émulés dans `corps_web`)."""
+        req = {"temperature": corps_web.get("temperature"), "top_p": corps_web.get("topP"),
+               "max_tokens": corps_web.get("maxTokens"),
+               "include_venice_system_prompt": corps_web.get("includeVeniceSystemPrompt", False)}
+        r = self._poster(self._corps(modele, messages_depuis_corps(corps_web), {k: v for k, v in req.items() if v is not None},
+                                     True), True)
+        try:
+            for d in self._lignes_sse(r):
+                if d.get("usage"):
+                    etat["jetons"] = d["usage"].get("total_tokens", etat.get("jetons", 0))
+                for choix in d.get("choices") or []:
+                    morceau = (choix.get("delta") or {}).get("content")
+                    if morceau:
+                        yield morceau
+        finally:
+            r.close()
+
+    def lister(self):
+        return [{"id": PREFIXE_API + m, "object": "model", "owned_by": "venice-api",
+                 "tool_calling": bool(((v.get("model_spec") or {}).get("capabilities") or {}).get("supportsFunctionCalling")),
+                 "context_length": (v.get("model_spec") or {}).get("availableContextTokens")}
+                for m, v in sorted(self.catalogue().items())]
+
+
+# --- Cœur commun des trois formats (chat completions, Messages d'Anthropic, Responses) -----------------------------
+#
+# Chaque format traduit sa requête en requête chat completions, puis lit une suite d'événements :
+#   ("texte", str)       morceau de réponse, à relayer tout de suite
+#   ("appels", [...])    appels d'outil au format OpenAI (complets : le JSON émulé n'est analysable qu'entier)
+#   ("fin", {...})       raison de fin et usage
+# Le flux est donc réel pour le texte, y compris quand des outils sont fournis : seule la partie qui ressemble à un
+# appel d'outil est retenue jusqu'à la fin pour être analysée.
+
+class RefusPont(Exception):
+    """Requête refusée par le pont avant tout appel à Venice (modèle payant, plafond, contexte…)."""
+
+    def __init__(self, statut, code, message, entetes=None):
+        super().__init__(message)
+        self.statut, self.code, self.message, self.entetes = statut, code, message, entetes or {}
+
+
+CONSIGNE_OBLIGATOIRE = (
+    "\n\n[OBLIGATOIRE] Cette réponse DOIT être un appel d'outil ({cible}) au format "
+    '{{"tool_calls":[{{"name":"<outil>","arguments":{{...}}}}]}}, sans aucun texte.'
+)
+
+# Alias de modèles : les clients de code envoient leurs propres noms (claude-sonnet-…, gpt-5-codex…). Motifs fnmatch,
+# premier qui correspond ; VENICE_PONT_ALIAS="motif=modele,motif=modele" remplace la liste ; un nom exact passe tel quel.
+ALIAS_DEFAUT = "claude-*haiku*=qwen-3-8-27b,claude-*=kimi-k2-5,gpt-*=kimi-k2-5,o[0-9]*=kimi-k2-5,codex-*=kimi-k2-5"
+
+
+def lire_alias(texte):
+    paires = []
+    for morceau in (texte or "").split(","):
+        motif, _, cible = morceau.partition("=")
+        if motif.strip() and cible.strip():
+            paires.append((motif.strip(), cible.strip()))
+    return paires
+
+
+ALIAS_MODELES = lire_alias(os.environ.get("VENICE_PONT_ALIAS", ALIAS_DEFAUT))
+
+
+def resoudre_modele(nom, alias=None):
+    """Nom envoyé par le client -> modèle Venice. Un modèle connu du pont (ou préfixé api/) n'est jamais réécrit."""
+    import fnmatch
+    if not isinstance(nom, str) or not nom:
+        return nom
+    if nom in GRATUITS or nom in MODELES_AGENT or nom.startswith(PREFIXE_API):
+        return nom
+    for motif, cible in (ALIAS_MODELES if alias is None else alias):
+        if fnmatch.fnmatchcase(nom.lower(), motif.lower()):
+            return cible
+    return nom
+
+
+def preparer_outils(req):
+    """(outils effectifs, obligatoire, nom imposé) selon `tools` et `tool_choice` (format OpenAI)."""
+    outils = req.get("tools") or None
+    choix = req.get("tool_choice")
+    if not outils or choix == "none":
+        return None, False, None
+    if isinstance(choix, dict):
+        nom = (choix.get("function") or {}).get("name") or choix.get("name")
+        if nom:
+            choisis = [o for o in outils if o.get("function", o).get("name") == nom]
+            return (choisis or outils), True, nom
+    return outils, choix in ("required", "any"), None
+
+
+def imposer_outil(corps, cible):
+    """Copie du corps Venice avec la consigne « appel obligatoire » en fin de système et de dernier message."""
+    consigne = CONSIGNE_OBLIGATOIRE.format(cible=cible)
+    corps = copy.deepcopy(corps)
+    corps["systemPrompt"] = (corps.get("systemPrompt") or "") + consigne
+    prompt = corps.get("prompt") or []
+    if prompt and prompt[-1].get("role") == "user":
+        prompt[-1]["content"] = (prompt[-1].get("content") or "") + consigne
+    return corps
+
+
+# Chat classique : Venice garde la fin d'un prompt trop long et jette le début, en silence (mesuré entre 39 000 et
+# 40 000 jetons). Le début, c'est le prompt système, donc la définition des outils : l'agent devient muet. Le pont
+# élague lui-même les messages les plus anciens (en gardant système, premier message et fin de conversation) ou
+# refuse avec `context_length_exceeded`, que les clients de code savent traiter en compactant.
+CONTEXTE_CHAT = int(os.environ.get("VENICE_PONT_CONTEXTE_CHAT", "36000"))
+ELAGAGE = os.environ.get("VENICE_PONT_ELAGAGE", "1") != "0"
+CARACTERES_PAR_JETON = 3.2  # prudent : code et français tokenisent plus serré que 4 caractères par jeton
+NOTE_ELAGAGE = "[Le pont a retiré {n} message(s) ancien(s) pour tenir dans le contexte de {modele}.]"
+
+
+def jetons_prudents(texte):
+    return int(len(texte or "") / CARACTERES_PAR_JETON) + 1
+
+
+def _jetons_message(m):
+    return jetons_prudents(m.get("content") if isinstance(m.get("content"), str) else "") + 4
+
+
+class ContexteDepasse(RefusPont):
+    def __init__(self, estime, maximum, modele):
+        super().__init__(400, "context_length_exceeded",
+                         f"prompt is too long: {estime} tokens > {maximum} maximum (estimation du pont pour {modele}, "
+                         "chat classique de Venice). Compactez la conversation ou prenez un modèle de la route agents "
+                         "(kimi-k2-5, deepseek-v4-1-flash-uncensored).")
+        self.estime, self.maximum = estime, maximum
+
+
+def garder_contexte(modele, corps, maximum=None, elaguer=None):
+    """Corps Venice qui tient dans le chat classique, ou ContexteDepasse. La route agents n'est pas concernée."""
+    maximum = CONTEXTE_CHAT if maximum is None else maximum
+    elaguer = ELAGAGE if elaguer is None else elaguer
+    if est_agent(modele) or maximum <= 0:
+        return corps
+    prompt = corps.get("prompt") or []
+    fixe = jetons_prudents(corps.get("systemPrompt")) + int(corps.get("maxTokens") or 0) // 8
+    total = fixe + sum(_jetons_message(m) for m in prompt)
+    if total <= maximum:
+        return corps
+    if not elaguer or len(prompt) < 3:
+        raise ContexteDepasse(total, maximum, modele)
+    # Garder le premier message (souvent la tâche) et la fin ; retirer depuis le deuxième.
+    garde_debut, reste = prompt[:1], list(prompt[1:])
+    retires = 0
+    while reste and len(reste) > 1 and total > maximum:
+        total -= _jetons_message(reste.pop(0))
+        retires += 1
+    # Ne pas commencer la fin par un résultat d'outil orphelin de son appel.
+    while len(reste) > 1 and reste[0].get("role") == "user" and str(reste[0].get("content", "")).startswith("Résultat de l'outil"):
+        total -= _jetons_message(reste.pop(0))
+        retires += 1
+    note = {"role": "user", "content": NOTE_ELAGAGE.format(n=retires, modele=modele)}
+    total += _jetons_message(note)
+    if total > maximum:
+        raise ContexteDepasse(total, maximum, modele)
+    corps = dict(corps)
+    corps["prompt"] = garde_debut + [note] + reste
+    return corps
+
+
+class FiltreAppel:
+    """Laisse passer le texte au fil de l'eau ; retient tout à partir de ce qui ressemble au début d'un appel d'outil
+    (`{"tool_calls"`, `{"name"`, `<tool_call>`, bloc ```), pour l'analyser entier à la fin."""
+
+    MARQUEUR = re.compile(r'[{\[]\s*[{]?\s*"(?:tool_calls|name|function|tool)"|<tool_call|```')
+    OUVRANTS = "{[<`"
+    FENETRE = 24
+
+    def __init__(self):
+        self.tampon, self.retenu, self.pensee = "", False, False
+
+    def pousser(self, morceau):
+        """Texte qu'on peut envoyer tout de suite."""
+        self.tampon += morceau
+        if self.retenu:
+            return ""
+        if "<think>" in self.tampon and "</think>" not in self.tampon:
+            # Réflexion en cours : relayée telle quelle, on n'y cherche pas d'appel.
+            sortie, self.tampon = self.tampon, ""
+            self.pensee = True
+            return sortie
+        if self.pensee:
+            if "</think>" not in self.tampon:
+                sortie, self.tampon = self.tampon, ""
+                return sortie
+            fin = self.tampon.index("</think>") + len("</think>")
+            sortie, self.tampon, self.pensee = self.tampon[:fin], self.tampon[fin:], False
+            return sortie + self.pousser("")
+        m = self.MARQUEUR.search(self.tampon)
+        if m:
+            sortie, self.tampon, self.retenu = self.tampon[:m.start()], self.tampon[m.start():], True
+            return sortie
+        coupe = len(self.tampon)
+        for i in range(max(0, len(self.tampon) - self.FENETRE), len(self.tampon)):
+            if self.tampon[i] in self.OUVRANTS:
+                coupe = i
+                break
+        sortie, self.tampon = self.tampon[:coupe], self.tampon[coupe:]
+        return sortie
+
+    def reste(self):
+        reste, self.tampon = self.tampon, ""
+        return reste
+
+
+def usage_estime(contenu, appels, jetons=0, entree=None):
+    """Usage OpenAI : total réel de la route agents si connu, sinon estimation ~4 caractères par jeton."""
+    sortie = (contenu or "") + "".join((tc.get("function") or {}).get("arguments") or "" for tc in appels or [])
+    completion = _jetons_estimes(sortie)
+    if jetons:
+        prompt, total = max(0, jetons - completion), jetons
+    else:
+        prompt = _jetons_estimes(_texte_corps(entree))
+        total = prompt + completion
+    return {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": total}
+
+
+def morceaux_source(jeton, modele, corps, etat, api=None):
+    """Morceaux de texte d'une réponse Venice en flux : API officielle, route agents ou chat classique."""
+    if api is not None and modele.startswith(PREFIXE_API):
+        return api.morceaux_emules(modele[len(PREFIXE_API):], corps, etat)
+    if est_agent(modele):
+        return deltas_agent(reponse_agent(jeton, modele, corps), etat)
+    return morceaux_contenu(discuter(jeton, corps))
+
+
+def texte_source(jeton, modele, corps, api=None):
+    """(texte, jetons) d'une réponse Venice complète."""
+    if api is not None and modele.startswith(PREFIXE_API):
+        etat = {"jetons": 0}
+        return "".join(api.morceaux_emules(modele[len(PREFIXE_API):], corps, etat)), etat["jetons"]
+    return lire_reponse(jeton, modele, corps)
+
+
+def _limiter_appels(appels, req):
+    if appels and req.get("parallel_tool_calls") is False:
+        return appels[:1]
+    return appels
+
+
+def evenements_chat(jeton, req, medias=None, flux=False, api=None):
+    """Événements ("texte"|"appels"|"fin", valeur) pour une requête chat completions déjà contrôlée."""
+    modele = req["model"]
+    if api is not None and modele.startswith(PREFIXE_API) and api.outils_natifs(modele[len(PREFIXE_API):]):
+        yield from api.evenements_natifs(modele[len(PREFIXE_API):], req, flux)
+        return
+    outils, obligatoire, impose = preparer_outils(req)
+    corps = construire_corps_venice(modele, req["messages"], outils, req, medias)
+    if outils and obligatoire:
+        corps = imposer_outil(corps, impose or ", ".join(str(o.get("function", o).get("name")) for o in outils))
+    if not modele.startswith(PREFIXE_API):
+        corps = garder_contexte(modele, corps)
+    emis, jetons = [], 0
+    if not flux:
+        texte, jetons = texte_source(jeton, modele, corps, api)
+        contenu, appels = extraire_appels(texte, outils)
+    elif not outils:
+        etat = {"jetons": 0}
+        for morceau in morceaux_source(jeton, modele, corps, etat, api):
+            emis.append(morceau)
+            yield "texte", morceau
+        yield "fin", {"raison": "stop", "usage": usage_estime("".join(emis), None, etat["jetons"], corps)}
+        return
+    else:
+        etat, filtre, morceaux = {"jetons": 0}, FiltreAppel(), []
+        for morceau in morceaux_source(jeton, modele, corps, etat, api):
+            morceaux.append(morceau)
+            libre = filtre.pousser(morceau)
+            if libre:
+                emis.append(libre)
+                yield "texte", libre
+        texte, jetons = "".join(morceaux), etat["jetons"]
+        retenu = filtre.reste()
+        contenu, appels = extraire_appels(retenu, outils) if retenu else (None, None)
+        if not appels:
+            contenu = retenu or None
+    if outils and not appels and (obligatoire or refus_outils(texte)):
+        # Outil natif de Venice tenté (« Tool not found ») ou appel imposé non rendu : une relance corrective.
+        texte2, jetons2 = texte_source(jeton, modele, rappeler_correction(corps, outils), api)
+        contenu2, appels2 = extraire_appels(texte2, outils)
+        if appels2:
+            appels, jetons = appels2, jetons2
+            contenu = contenu2 if not flux else None  # en flux, le premier texte est déjà parti
+    appels = _limiter_appels(appels, req)
+    if contenu:
+        emis.append(contenu)
+        yield "texte", contenu
+    if appels:
+        yield "appels", appels
+    yield "fin", {"raison": "tool_calls" if appels else "stop",
+                  "usage": usage_estime("".join(emis), appels, jetons, corps)}
+
+
+def _chainer(premier, reste):
+    yield premier
+    yield from reste
+
+
+def _sans_erreur(evenements):
+    """Une erreur Venice en cours de flux devient un texte puis une fin : les en-têtes 200 sont déjà partis."""
+    try:
+        yield from evenements
+    except (RuntimeError, ErreurReseau, ErreurVenice, CookieExpire) as e:
+        yield "texte", f"\n[erreur Venice : {str(e)[:300]}]"
+        yield "fin", {"raison": "stop", "usage": {}}
+
+
+def collecter(evenements):
+    """(contenu, appels, fin) d'une suite d'événements."""
+    textes, appels, fin = [], None, {"raison": "stop", "usage": {}}
+    for genre, valeur in evenements:
+        if genre == "texte":
+            textes.append(valeur)
+        elif genre == "appels":
+            appels = (appels or []) + valeur
+        elif genre == "fin":
+            fin = valeur
+    return ("".join(textes) or None), appels, fin
 
 
 # Modèles sans pièce = illimités avec Pro (relevé de nicolas dans le sélecteur de venice.ai, banc du 28/10/2026 : 0 crédit débité).
@@ -1396,8 +2013,9 @@ def lister_modeles_audio():
 
 
 def fabriquer_handler(jeton, cle_pont, source=None, limiteur=None, suivi=None, limiteur_images=None, limiteur_voix=None,
-                      quotas=None, medias=None):
+                      quotas=None, medias=None, api=None, api_seule=False):
     medias = medias or Medias(jeton, limiteur, limiteur_voix)
+    conversations = formats.ConversationsResponses()
 
     class H(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -1417,13 +2035,20 @@ def fabriquer_handler(jeton, cle_pont, source=None, limiteur=None, suivi=None, l
             self.end_headers()
             self.wfile.write(data)
 
+        format_erreur = "openai"
+
         def _erreur(self, code, nom, message, entetes=None):
-            self._json(code, {"error": {"code": nom, "message": message}}, entetes)
+            if self.format_erreur == "anthropic":
+                return self._json(code, formats.erreur_anthropic(code, message), entetes)
+            self._json(code, {"error": {"code": nom, "message": message, "type": nom}}, entetes)
 
         def _autorise(self):
-            if cle_valide(self.headers.get("Authorization"), cle_pont):
+            # Claude Code présente sa clé dans x-api-key (ANTHROPIC_API_KEY) ou en Bearer (ANTHROPIC_AUTH_TOKEN).
+            cle_anthropic = self.headers.get("x-api-key")
+            if cle_valide(self.headers.get("Authorization"), cle_pont) or (
+                    cle_anthropic and cle_pont and hmac.compare_digest(cle_anthropic, cle_pont)):
                 return True
-            self._json(401, {"error": {"message": "clé du pont invalide"}})
+            self._erreur(401, "cle_invalide", "clé du pont invalide")
             return False
 
         def _lire_corps(self):
@@ -1453,7 +2078,10 @@ def fabriquer_handler(jeton, cle_pont, source=None, limiteur=None, suivi=None, l
             return True
 
         def do_GET(self):
+            self.format_erreur = "openai"
             if self.path == "/health":
+                if api_seule:
+                    return self._json(200, {"ok": True, "mode": "api", **({"api": api.url} if api else {})})
                 try:
                     jeton.obtenir()
                     return self._json(200, {"ok": True, **jeton.etat(), **(source.etat() if source else {}),
@@ -1469,7 +2097,10 @@ def fabriquer_handler(jeton, cle_pont, source=None, limiteur=None, suivi=None, l
                       "/v1/images/models": lister_modeles_image, "/v1/audio/models": lister_modeles_audio}
             if self.path in listes:
                 try:
-                    return self._json(200, {"object": "list", "data": listes[self.path]()})
+                    donnees = [] if api_seule and listes[self.path] is lister_modeles else listes[self.path]()
+                    if api and listes[self.path] is lister_modeles:
+                        donnees = donnees + api.lister()
+                    return self._json(200, {"object": "list", "data": donnees})
                 except Exception as e:
                     return self._json(502, {"error": {"message": str(e)[:200]}})
             if self.path == "/credits" and suivi:
@@ -1479,15 +2110,18 @@ def fabriquer_handler(jeton, cle_pont, source=None, limiteur=None, suivi=None, l
             self._json(404, {"error": {"message": "inconnu"}})
 
         def do_POST(self):
+            chemin = self.path.split("?")[0]
+            self.format_erreur = "anthropic" if chemin.startswith("/v1/messages") else "openai"
             if not self._autorise():
                 return
             corps = self._lire_corps()
             if corps is None:
                 return
-            chemin = self.path.split("?")[0]
             if chemin == "/credits/acquitter" and suivi:
                 return self._json(200, suivi.acquitter())
             routes = {"/v1/chat/completions": self._chat, "/chat/completions": self._chat,
+                      "/v1/messages": self._messages, "/v1/messages/count_tokens": self._compter_jetons,
+                      "/v1/responses": self._responses, "/responses": self._responses,
                       "/v1/images/generations": self._images, "/v1/audio/speech": self._synthese,
                       "/v1/audio/transcriptions": self._transcription, "/v1/embeddings": self._embeddings, "/v1/ocr": self._ocr,
                       "/v1/images/edits": self._edition, "/v1/images/upscale": self._agrandissement,
@@ -1496,14 +2130,16 @@ def fabriquer_handler(jeton, cle_pont, source=None, limiteur=None, suivi=None, l
                 return self._json(404, {"error": {"message": "inconnu"}})
             try:
                 routes[chemin](corps)
+            except RefusPont as e:
+                self._erreur(e.statut, e.code, e.message, e.entetes)
             except EntreeInvalide as e:
                 self._erreur(e.statut, "entree_invalide", str(e))
             except ErreurVenice as e:
                 self._erreur(e.statut, "erreur_venice", str(e))
             except CookieExpire as e:
-                self._json(503, {"error": {"message": "cookie Venice expiré", "detail": str(e)}})
+                self._erreur(503, "cookie_expire", f"cookie Venice expiré : {e}")
             except Exception as e:
-                self._json(502, {"error": {"message": str(e)[:300]}})
+                self._erreur(502, "erreur_pont", str(e)[:300])
 
         def _json_requis(self, corps):
             try:
@@ -1514,33 +2150,141 @@ def fabriquer_handler(jeton, cle_pont, source=None, limiteur=None, suivi=None, l
                 raise EntreeInvalide("objet JSON attendu")
             return req
 
+        def _controler_chat(self, req):
+            """Contrôles communs aux trois formats de chat ; modifie `req["model"]` (alias, mode API seule).
+            RefusPont si la requête ne doit pas partir chez Venice."""
+            modele = req.get("model")
+            if not isinstance(modele, str) or not modele:
+                raise RefusPont(400, "entree_invalide", "model : nom de modèle requis")
+            if not isinstance(req.get("messages"), list):
+                raise RefusPont(400, "entree_invalide", "messages : liste requise")
+            modele = resoudre_modele(modele)
+            if api_seule and not modele.startswith(PREFIXE_API):
+                modele = PREFIXE_API + modele
+            req["model"] = modele
+            if modele.startswith(PREFIXE_API):
+                if api is None:
+                    raise RefusPont(400, "api_non_configuree", "modèle api/… : ajoutez VENICE_API_KEY au fichier de secrets du pont")
+            else:
+                if not (AUTORISER_PAYANTS or modele in GRATUITS or req.get("autoriser_debit") is True):
+                    raise RefusPont(403, "modele_payant_refuse", f"{modele} n'est pas dans la liste des modèles sans pièce "
+                                    "(débit de crédits). Débit volontaire : autoriser_debit: true.")
+                if contient_images(req["messages"]) and (
+                        est_agent(modele) or (modele not in VISION_GRATUITS and req.get("autoriser_debit") is not True)):
+                    raise RefusPont(400, "modele_sans_vision", f"{modele} ne lit pas les images avec ce pont. "
+                                    f"Modèles vision sans pièce : {', '.join(VISION_GRATUITS)}.")
+            if limiteur:
+                ok, attente = limiteur.essayer()
+                if not ok:
+                    raise RefusPont(429, "plafond_pont", f"plafond du pont atteint, réessayer dans {attente} s",
+                                    {"Retry-After": str(attente)})
+            return modele
+
+        def _evenements(self, req, flux):
+            """Événements du cœur ; en flux, le premier est tiré avant les en-têtes pour qu'une erreur reste un vrai
+            code HTTP. Renvoie un itérateur (premier événement inclus)."""
+            gen = evenements_chat(jeton, req, medias, flux=flux, api=api)
+            if not flux:
+                return gen
+            try:
+                premier = next(gen)
+            except StopIteration:
+                return iter(())
+            except (RuntimeError, ErreurReseau) as e:
+                raise RefusPont(502, "venice_erreur", str(e)[:300]) from None
+            return _chainer(premier, gen)
+
         def _chat(self, corps):
             req = self._json_requis(corps)
-            modele = req["model"]
-            if self._refus_payant(modele, req, GRATUITS):
-                return
-            images = contient_images(req["messages"])
-            if images and (est_agent(modele) or (modele not in VISION_GRATUITS and req.get("autoriser_debit") is not True)):
-                return self._erreur(400, "modele_sans_vision", f"{modele} ne lit pas les images avec ce pont. "
-                                    f"Modèles vision sans pièce : {', '.join(VISION_GRATUITS)}.")
-            if not self._limite(limiteur):
-                return
-            outils = req.get("tools") or None
-            corps_venice = construire_corps_venice(modele, req["messages"], outils, req, medias)
-            if req.get("stream") and not outils:  # sans outil, rien à analyser : relais au fil de l'eau
-                return self._chat_flux(modele, corps_venice)
-            texte, jetons = lire_reponse(jeton, modele, corps_venice)
-            contenu, appels = extraire_appels(texte, outils)
-            if outils and not appels and refus_outils(texte):
-                # Le modèle a tenté les outils natifs de Venice (« Tool not found ») : une relance corrective.
-                texte2, jetons2 = lire_reponse(jeton, modele, rappeler_correction(corps_venice, outils))
-                contenu2, appels2 = extraire_appels(texte2, outils)
-                if appels2:
-                    contenu, appels, jetons = contenu2, appels2, jetons2
-            rep = reponse_openai(modele, contenu, appels, jetons, corps_venice)
-            if not req.get("stream"):
+            modele = self._controler_chat(req)
+            flux = bool(req.get("stream"))
+            evenements = self._evenements(req, flux)
+            if not flux:
+                contenu, appels, fin = collecter(evenements)
+                rep = reponse_openai(modele, contenu, appels)
+                rep["choices"][0]["finish_reason"] = fin["raison"]
+                rep["usage"] = fin.get("usage") or rep["usage"]
                 return self._json(200, rep)
-            self._sse(rep)
+            base = {"id": "chatcmpl-" + uuid.uuid4().hex[:24], "object": "chat.completion.chunk",
+                    "created": int(time.time()), "model": modele}
+
+            def morceaux():
+                yield {**base, "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}]}
+                try:
+                    for genre, valeur in evenements:
+                        if genre == "texte":
+                            yield {**base, "choices": [{"index": 0, "delta": {"content": valeur}, "finish_reason": None}]}
+                        elif genre == "appels":
+                            for i, tc in enumerate(valeur):  # forme canonique : en-tête (id, nom), puis arguments
+                                yield {**base, "choices": [{"index": 0, "delta": {"tool_calls": [{
+                                    "index": i, "id": tc["id"], "type": "function",
+                                    "function": {"name": tc["function"]["name"], "arguments": ""}}]}, "finish_reason": None}]}
+                                yield {**base, "choices": [{"index": 0, "delta": {"tool_calls": [{
+                                    "index": i, "function": {"arguments": tc["function"]["arguments"]}}]}, "finish_reason": None}]}
+                        elif genre == "fin":
+                            yield {**base, "choices": [{"index": 0, "delta": {}, "finish_reason": valeur["raison"]}],
+                                   "usage": valeur.get("usage")}
+                except (RuntimeError, ErreurReseau, ErreurVenice) as e:  # en cours de flux : le client a déjà des morceaux
+                    yield {**base, "choices": [{"index": 0, "delta": {"content": f"\n[erreur Venice : {e}]"}, "finish_reason": None}]}
+                    yield {**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}
+
+            self._sse_flux(("", m) for m in morceaux())
+
+        def _messages(self, corps):
+            """API Messages d'Anthropic (Claude Code) : traduite en chat completions, puis retraduite."""
+            a = self._json_requis(corps)
+            req = formats.requete_depuis_anthropic(a)
+            modele = self._controler_chat(req)
+            flux = bool(req.get("stream"))
+            evenements = self._evenements(req, flux)
+            if not flux:
+                contenu, appels, fin = collecter(evenements)
+                return self._json(200, formats.reponse_anthropic(modele, contenu, appels, fin))
+            self._sse_flux(formats.flux_anthropic(modele, _sans_erreur(evenements), formats.jetons_entree_anthropic(a)))
+
+        def _compter_jetons(self, corps):
+            a = self._json_requis(corps)
+            self._json(200, {"input_tokens": formats.jetons_entree_anthropic(a)})
+
+        def _responses(self, corps):
+            """API Responses d'OpenAI (Codex CLI) : traduite en chat completions, puis retraduite."""
+            r = self._json_requis(corps)
+            try:
+                req, genres = formats.requete_depuis_responses(r, conversations)
+            except KeyError:
+                raise RefusPont(400, "previous_response_not_found", "previous_response_id inconnu (le pont ne garde que les "
+                                "200 dernières réponses, en mémoire) : renvoyez tout l'historique") from None
+            modele = self._controler_chat(req)
+            flux = bool(req.get("stream"))
+            evenements = self._evenements(req, flux)
+            ident = "resp_" + uuid.uuid4().hex[:24]
+            historique = [m for m in req["messages"]]
+            if not flux:
+                contenu, appels, fin = collecter(evenements)
+                conversations.garder(ident, historique + formats.messages_assistant(contenu, appels))
+                return self._json(200, formats.reponse_responses(modele, r, contenu, appels, fin, genres, ident))
+            sortie = []
+            self._sse_flux(formats.flux_responses(modele, r, _sans_erreur(evenements), genres, ident, sortie))
+            conversations.garder(ident, historique + sortie)
+
+        def _sse_flux(self, evenements):
+            """Envoie des événements SSE (nom, données) au fil de l'eau ; nom vide = format chat completions."""
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.close_connection = True
+            try:
+                for nom, donnees in evenements:
+                    entete = f"event: {nom}\n".encode() if nom else b""
+                    self.wfile.write(entete + b"data: " + json.dumps(donnees, ensure_ascii=False).encode() + b"\n\n")
+                    self.wfile.flush()
+                if self.format_erreur == "openai" and not self.path.split("?")[0].endswith("responses"):
+                    self.wfile.write(b"data: [DONE]\n\n")
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                return
 
         def _images(self, corps):
             req = self._json_requis(corps)
@@ -1734,71 +2478,6 @@ def fabriquer_handler(jeton, cle_pont, source=None, limiteur=None, suivi=None, l
             image, _genre, _entetes = detourer_venice(jeton, f"data:{mime};base64,{base64.b64encode(octets).decode()}")
             self._sortie_images([{"b64_json": base64.b64encode(image).decode()}])
 
-        def _chat_flux(self, modele, corps_venice):
-            """Relais SSE au fil de l'eau : le client lit le premier morceau sans attendre la fin."""
-            etat = {"jetons": 0}
-            if est_agent(modele):
-                pieces = deltas_agent(reponse_agent(jeton, modele, corps_venice), etat)
-            else:
-                pieces = morceaux_contenu(discuter(jeton, corps_venice))
-            flux = iter(pieces)
-            try:  # premier morceau tiré avant les en-têtes : une erreur reste un vrai 502 JSON
-                premier = next(flux)
-            except StopIteration:
-                premier = None
-            except RuntimeError as e:
-                return self._erreur(502, "venice_erreur", str(e))
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-            self.send_header("Cache-Control", "no-cache")
-            self.send_header("Connection", "close")
-            self.end_headers()
-            base = {"id": "chatcmpl-" + uuid.uuid4().hex[:24], "object": "chat.completion.chunk",
-                    "created": int(time.time()), "model": modele}
-
-            def envoyer(delta, fin=None):
-                m = {**base, "choices": [{"index": 0, "delta": delta, "finish_reason": fin}]}
-                self.wfile.write(b"data: " + json.dumps(m, ensure_ascii=False).encode() + b"\n\n")
-                self.wfile.flush()
-
-            envoyer({"role": "assistant", "content": ""})
-            texte = []
-
-            def ajouter(morceau):
-                texte.append(morceau)
-                envoyer({"content": morceau})
-
-            try:
-                if premier is not None:
-                    ajouter(premier)
-                for morceau in flux:
-                    ajouter(morceau)
-            except (BrokenPipeError, ConnectionResetError):
-                self.close_connection = True
-                return
-            except RuntimeError as e:  # erreur en cours de flux : le client a déjà reçu des morceaux
-                envoyer({"content": f"\n[erreur Venice : {e}]"})
-            sortie = _jetons_estimes("".join(texte))
-            total = etat["jetons"] or (_jetons_estimes(_texte_corps(corps_venice)) + sortie)
-            self.wfile.write(b"data: " + json.dumps(
-                {**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-                 "usage": {"prompt_tokens": max(0, total - sortie), "completion_tokens": sortie,
-                           "total_tokens": total}}, ensure_ascii=False).encode() + b"\n\n")
-            self.wfile.write(b"data: [DONE]\n\n")
-            self.wfile.flush()
-            self.close_connection = True
-
-        def _sse(self, rep):
-            morceaux = morceaux_sse(rep)
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-            self.send_header("Connection", "close")
-            self.end_headers()
-            for m in morceaux:
-                self.wfile.write(b"data: " + json.dumps(m, ensure_ascii=False).encode() + b"\n\n")
-            self.wfile.write(b"data: [DONE]\n\n")
-            self.close_connection = True
-
     return H
 
 
@@ -1807,24 +2486,46 @@ class ServeurPont(ThreadingHTTPServer):
     daemon_threads = True
 
 
+class JetonAbsent:
+    """Mode « API seule » : aucun cookie, les routes du site (images, voix…) répondent 503."""
+
+    def obtenir(self):
+        raise CookieExpire("aucun cookie __client : pont en mode API seule (VENICE_API_KEY)")
+
+    def invalider(self):
+        pass
+
+    def etat(self):
+        return {"cookie_ok": None, "mode": "api"}
+
+
 def main():
     fichier = os.environ.get("VENICE_PONT_ENV", "~/services/venice-pont/secrets/venice.env")
     env = lire_env(fichier)
-    source = SourceClerk(env["VENICE_CLERK_CLIENT"], fichier)
-    jeton = JetonClerk(source.mint)
+    cle_api = os.environ.get("VENICE_API_KEY") or env.get("VENICE_API_KEY")
+    api = ApiVenice(cle_api) if cle_api else None
+    api_seule = api is not None and not env.get("VENICE_CLERK_CLIENT")
     hote, port = os.environ.get("VENICE_PONT_ECOUTE", "127.0.0.1:8700").split(":")
     limiteur = LimiteurDebit(int(os.environ.get("VENICE_PONT_MAX_PAR_MIN", "20")))
-    suivi = SuiviCredits(lambda: lire_solde(jeton), fichier=os.path.expanduser(
-        os.environ.get("VENICE_PONT_CREDITS", "~/services/venice-pont/credits.json")))
+    if api_seule:
+        source, jeton, suivi, quotas = None, JetonAbsent(), None, None
+    else:
+        source = SourceClerk(env["VENICE_CLERK_CLIENT"], fichier)
+        jeton = JetonClerk(source.mint)
+        suivi = SuiviCredits(lambda: lire_solde(jeton), fichier=os.path.expanduser(
+            os.environ.get("VENICE_PONT_CREDITS", "~/services/venice-pont/credits.json")))
+        quotas = SuiviQuotas(lambda: lire_quotas_venice(jeton))
     limiteur_images = LimiteurDebit(int(os.environ.get("VENICE_PONT_MAX_IMAGES_PAR_MIN", "10")))
     limiteur_voix = LimiteurDebit(int(os.environ.get("VENICE_PONT_MAX_VOIX_PAR_MIN", "30")))
-    quotas = SuiviQuotas(lambda: lire_quotas_venice(jeton))
     srv = ServeurPont((hote, int(port)), fabriquer_handler(jeton, env["VENICE_PONT_CLE"], source, limiteur, suivi,
-                                                           limiteur_images, limiteur_voix, quotas))
-    threading.Thread(target=boucle_touche, args=(source,), daemon=True).start()
-    threading.Thread(target=boucle_credits, args=(suivi,), daemon=True).start()
-    threading.Thread(target=boucle_quotas, args=(quotas,), daemon=True).start()
-    print(f"venice-pont à l'écoute sur {hote}:{port}", file=sys.stderr, flush=True)
+                                                           limiteur_images, limiteur_voix, quotas, api=api,
+                                                           api_seule=api_seule))
+    if not api_seule:
+        threading.Thread(target=boucle_touche, args=(source,), daemon=True).start()
+        threading.Thread(target=boucle_credits, args=(suivi,), daemon=True).start()
+        threading.Thread(target=boucle_quotas, args=(quotas,), daemon=True).start()
+    mode = "API seule" if api_seule else ("web + API officielle (modèles api/…)" if api else "web")
+    print(f"venice-pont à l'écoute sur {hote}:{port} (mode {mode})", file=sys.stderr, flush=True)
     srv.serve_forever()
 
 

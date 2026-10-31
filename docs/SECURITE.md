@@ -20,7 +20,9 @@ Le pont ne contourne aucune protection anti-robot : il n'ajoute que les en-tête
 | **Plafond de débit** | au-delà de 20 requêtes sur 60 s (tous clients confondus) : 429 `plafond_pont` + `Retry-After` | `VENICE_PONT_MAX_PAR_MIN` |
 | **Alerte solde** | le solde est relu toutes les 10 minutes ; s'il baisse de 0,5 crédit ou plus sous la référence, `/health` expose `credits.alerte: true` et `credits.debit` ; `venice-setup status` sort en code 1 | `POST /credits/acquitter` remet la référence au solde courant ; `GET /credits` force une relecture |
 | **Écoute locale** | le pont écoute sur `127.0.0.1` | `VENICE_PONT_ECOUTE` |
-| **Clé obligatoire** | toute requête sans `Authorization: Bearer <VENICE_PONT_CLE>` est refusée (401) | clé générée à `login`, conservée aux relances |
+| **Clé obligatoire** | toute requête sans `Authorization: Bearer <VENICE_PONT_CLE>` (ou `x-api-key`, format Anthropic) est refusée (401) | clé générée à `login`, conservée aux relances |
+| **Garde de contexte** | une conversation trop longue pour le chat classique est élaguée ou refusée (400) au lieu d'être tronquée en silence par Venice | `VENICE_PONT_CONTEXTE_CHAT`, `VENICE_PONT_ELAGAGE=0` |
+| **API officielle à part** | les modèles `api/…` ne passent par `api.venice.ai` que si `VENICE_API_KEY` est présente ; ils sont **facturés à l'usage** et échappent à la liste blanche (pas au plafond de débit) | retirer la clé du fichier coupe ce chemin |
 | **Plafond mémoire** | unité systemd `MemoryMax=256M`, `Nice=10` | `gabarits/venice-pont.service.in` |
 
 L'alerte de solde est un **détecteur après coup**, pas un frein : la liste blanche est le frein. Elle ne fait pas la différence entre un débit causé par le pont et un débit causé par votre usage direct du site Venice (images, vidéo…) ou de l'API : un solde qui baisse sans qu'aucune requête de modèle n'ait été envoyée par le pont (journal du service vide) vient d'ailleurs. Cas rencontré pendant les tests du 28/10/2026 : 260 crédits perdus en une minute, sans aucune requête d'inférence du pont.
@@ -31,6 +33,7 @@ L'alerte de solde est un **détecteur après coup**, pas un frein : la liste bla
 |---|---|---|
 | Cookie `__client` | `~/.config/venice-setup/<profil>/venice.env` (`VENICE_CLERK_CLIENT`) | fichier 600, dossier 700, écriture atomique (créé en 600 d'emblée) |
 | Clé du pont | même fichier (`VENICE_PONT_CLE`) | idem ; transmise aux clients par variable d'environnement ou `{file:…}` |
+| Clé API Venice (facultative) | même fichier (`VENICE_API_KEY`) | idem ; envoyée seulement à `api.venice.ai` |
 | Jeton Clerk de 60 s | mémoire du pont uniquement | jamais écrit |
 | Sauvegardes `venice.env.bak-*` | même dossier (700) | 600 ; supprimez-les si vous changez de cookie |
 

@@ -6,7 +6,7 @@ ENV PYTHONUNBUFFERED=1 \
     VENICE_PONT_ECOUTE=0.0.0.0:8700
 RUN apt-get update && apt-get install -y --no-install-recommends poppler-utils && rm -rf /var/lib/apt/lists/* \
  && useradd --system --uid 10001 --no-create-home pont && mkdir /data && chown pont /data
-COPY pont/venice_pont.py /app/venice_pont.py
+COPY pont/venice_pont.py pont/formats.py /app/
 USER pont
 VOLUME /data
 EXPOSE 8700

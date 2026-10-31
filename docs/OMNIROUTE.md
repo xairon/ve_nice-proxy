@@ -4,7 +4,7 @@
 
 - des **alias** d'usage (`ven-qwen-nc` au lieu de `qwen-3-8-27b`) avec repli entre modèles ;
 - **une clé par client**, limitée à certains alias, avec un plafond de requêtes (20 par minute) : on lit la consommation de chacun et on coupe un client sans toucher aux autres ;
-- la **traduction de formats** : `/v1/responses` (Codex CLI) et `/v1/messages` (Claude Code) sont convertis vers *chat completions* — vérifié le 28/10/2026 sur OmniRoute 3.8.52 ;
+- la **traduction de formats** : `/v1/responses` (Codex CLI) et `/v1/messages` (Claude Code) sont convertis vers *chat completions* — vérifié le 28/10/2026 sur OmniRoute 3.8.52. Depuis le 31/10/2026 le pont les expose lui-même : OmniRoute n'est plus nécessaire pour ces deux clients ;
 - un tableau de bord et un journal des appels.
 
 Version testée : **3.8.52**. Les gabarits `gabarits/omniroute/*.exemple.yaml` décrivent la configuration voulue (nœud, alias, clients) ; ce sont des documents de référence — le dépôt ne contient pas d'outil qui les applique : reproduisez-les dans le tableau de bord d'OmniRoute.

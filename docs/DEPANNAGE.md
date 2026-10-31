@@ -25,7 +25,9 @@ systemctl --user status venice-pont
 | Fichier écrit par l'agent **invalide**, arguments d'outil **dupliqués** | bogue du masqueur de secrets d'OmniRoute 3.8.52 | [OMNIROUTE.md](OMNIROUTE.md) §4 : couper `credentialRedactionEnabled` en base, ou passer par le pont direct |
 | L'agent « n'appelle pas » l'outil, répond en texte | appels d'outils émulés : certains modèles répondent en prose (Kimi K2.5, Aion 3.0) | rappelez l'outil dans la consigne, changez de modèle (`qwen-3-8-27b`) ; ou activez le repli `ven-agent` |
 | DeepSeek NC : « Tool not found », rien d'écrit | il se croit limité aux outils de Venice sur la route agents | utilisez Kimi K2.5 ou Qwen 3.8 pour les agents de code |
-| Claude Code répond n'importe quoi via `ven-qwen-nc` | son prompt (> 39k) est tronqué | utilisez `ven-kimi` |
+| Claude Code répond n'importe quoi via `ven-qwen-nc` (OmniRoute) | son prompt (> 39k) est tronqué | utilisez `ven-kimi`, ou branchez Claude Code directement sur le pont avec `kimi-k2-5` |
+| 400 `context_length_exceeded` / « prompt is too long » | conversation trop longue pour le chat classique (~36k estimés) ; le pont refuse au lieu de laisser Venice tronquer en silence | compactez (`/compact`), ou passez à `kimi-k2-5` / `deepseek-v4-1-flash-uncensored` ; réglage : `VENICE_PONT_CONTEXTE_CHAT` |
+| 400 `api_non_configuree` | modèle `api/…` sans clé | ajoutez `VENICE_API_KEY=` au fichier de secrets et redémarrez le pont |
 | `systemd utilisateur introuvable` à l'installation | macOS, Windows ou conteneur | `python3 venice-setup run` (premier plan) ou Docker : [INSTALL.md](INSTALL.md) |
 | `Python 3.9 ou plus requis` | interpréteur trop ancien | installez un Python récent |
 | Service tué (« killed », `oom-kill` dans le journal) | plafond de 256 Mo atteint, ou **mémoire de la machine épuisée (swap saturé)** | `journalctl --user -u venice-pont \| grep -i -E 'oom\|killed'` ; `free -m` ; libérez de la mémoire ou installez le pont sur une machine moins chargée ; le pont lui-même est léger (le plafond de 256 Mo est large ; consommation exacte non mesurée) |

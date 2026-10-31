@@ -1,0 +1,17 @@
+{
+  "openai/deepseek-v4-1-flash-uncensored": {
+    "max_input_tokens": 500000, "max_output_tokens": 16000,
+    "input_cost_per_token": 0, "output_cost_per_token": 0,
+    "litellm_provider": "openai", "mode": "chat"
+  },
+  "openai/kimi-k2-5": {
+    "max_input_tokens": 250000, "max_output_tokens": 16000,
+    "input_cost_per_token": 0, "output_cost_per_token": 0,
+    "litellm_provider": "openai", "mode": "chat"
+  },
+  "openai/qwen-3-8-27b": {
+    "max_input_tokens": 36000, "max_output_tokens": 8000,
+    "input_cost_per_token": 0, "output_cost_per_token": 0,
+    "litellm_provider": "openai", "mode": "chat"
+  }
+}

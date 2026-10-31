@@ -3,6 +3,7 @@
 ## Non publié
 
 ### Vérifié en réel (31/10/2026)
+- **aider + DeepSeek V4.1 Flash Uncensored** : sans outils, sur ce dépôt (109k jetons envoyés), renommage transversal en 66 s, 263 tests verts, 0 crédit ; kimi-k2-5 réussit aussi en 137 s. `venice-setup harness aider` imprime la recette (DeepSeek par défaut) et `gabarits/aider/aider.model.metadata.json` annonce les vraies fenêtres (500k / 250k).
 - **Claude Code 2.1.312 contre le vrai Venice** (`kimi-k2-5`, pont `main`) : lecture, édition et lancement de pytest par les outils émulés, bogue corrigé, tests verts, 0 crédit. `venice-setup harness claude-code` et `docs/HARNESS.md` le disent.
 
 ### Corrigé (31/10/2026, DeepSeek V4.1 Flash et les outils)

@@ -138,7 +138,7 @@ Windows : les tests du pont passent sur le runner Windows de la CI (28/10/2026),
 | `harness NOM [--modele M] [--appliquer]` | configuration pour un client (`opencode`, `openai`, `omniroute`, `hermes`, `openwebui`, `aider`, `cline`, `continue`, `codex`, `claude-code`) |
 | `profils` | liste les profils (un profil = un compte = un pont) |
 
-Tests : `python -m pytest tests pont/tests` (260 tests, aucun appel réseau).
+Tests : `python -m pytest tests pont/tests` (263 tests, aucun appel réseau).
 
 ## Ce qui n'est pas pris en charge
 

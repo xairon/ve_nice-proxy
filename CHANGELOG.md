@@ -2,6 +2,13 @@
 
 ## Non publié
 
+### Vérifié en réel (31/10/2026)
+- **Claude Code 2.1.312 contre le vrai Venice** (`kimi-k2-5`, pont `main`) : lecture, édition et lancement de pytest par les outils émulés, bogue corrigé, tests verts, 0 crédit. `venice-setup harness claude-code` et `docs/HARNESS.md` le disent.
+
+### Corrigé (31/10/2026, relevé pendant l'essai réel)
+- `venice-setup status` sans fichier de secrets disait « Pont injoignable » alors que le pont répondait : il dit maintenant que le fichier de secrets manque.
+- Le pont écrit une ligne par requête dans son journal (méthode, chemin sans paramètres, code ; jamais d'en-tête ni de contenu). `VENICE_PONT_JOURNAL=0` la coupe.
+
 ### Ajouté (31/10/2026 : module de code agentique)
 - **Claude Code en direct** : le pont expose l'API Messages d'Anthropic (`/v1/messages`, `/v1/messages/count_tokens`, flux SSE au format Anthropic, `tool_use`/`tool_result`, images, documents, clé en `x-api-key`). Essai réel : Claude Code 2.1.316 a écrit un fichier par l'outil `Write` émulé (réponses du modèle simulées). `venice-setup harness claude-code` pointe sur le pont.
 - **Codex CLI en direct** : `/v1/responses` (flux compris, `function_call`, outils `custom` comme `apply_patch`, `local_shell`, `previous_response_id` en mémoire). Vérifié avec le SDK OpenAI ; Codex lui-même pas encore lancé en direct. `venice-setup harness codex` pointe sur le pont.

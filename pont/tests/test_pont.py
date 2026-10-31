@@ -781,3 +781,20 @@ def test_relance_corrective_quand_le_modele_croit_n_avoir_aucun_outil(monkeypatc
         assert "CORRECTION" in corps_envoyes[1]["systemPrompt"]
     finally:
         srv.shutdown()
+
+
+def test_journal_une_ligne_par_requete_sans_parametres(serveur, capsys):
+    requete, *_ = serveur
+    requete("/health")
+    requete("/v1/models?jeton=secret")
+    err = capsys.readouterr().err
+    assert "GET /health 200" in err
+    assert "GET /v1/models " in err
+    assert "secret" not in err
+
+
+def test_journal_desactivable(serveur, capsys, monkeypatch):
+    monkeypatch.setattr(vp, "JOURNAL", False)
+    requete, *_ = serveur
+    requete("/health")
+    assert "/health" not in capsys.readouterr().err

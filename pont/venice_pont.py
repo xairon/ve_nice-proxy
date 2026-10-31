@@ -355,6 +355,8 @@ RAPPEL_OUTILS = (
     "sans texte avant. Outils disponibles : {noms}. N'appelle aucun outil natif de la plateforme."
 )
 
+RELANCES_NATIF = 2
+
 CONSIGNE_ECHEC = (
     "\n\n[CORRECTION] Ta réponse précédente a échoué : tu as tenté d'appeler un outil natif de la plateforme, "
     "qui n'en possède aucun et a répondu « Tool not found ». N'appelle AUCUN outil natif. Recommence en répondant "
@@ -816,23 +818,30 @@ def _decoder_json(texte):
         return json.JSONDecoder().raw_decode(repare)
     except ValueError:
         pass
-    # Fermer ce qui reste ouvert (hors chaînes) : un appel tronqué en fin de réponse reste exécutable.
-    pile, chaine, echap = [], False, False
+    # Fermer ce qui reste ouvert (hors chaînes) : un appel tronqué en fin de réponse reste exécutable. Une fermante
+    # qui ne correspond pas à l'ouvrante en cours (accolade en trop dans une liste, vu chez DeepSeek) est écartée.
+    pile, chaine, echap, sortie, ecartees = [], False, False, [], 0
     for c in repare:
         if chaine:
             echap = (c == "\\") and not echap
             if c == '"' and not echap:
                 chaine = False
-            continue
-        if c == '"':
+        elif c == '"':
             chaine, echap = True, False
         elif c in "{[":
             pile.append("}" if c == "{" else "]")
-        elif c in "}]" and pile:
-            pile.pop()
-    if not pile:
+        elif c in "}]":
+            if pile and pile[-1] == c:
+                pile.pop()
+            else:
+                ecartees += 1
+                continue
+        sortie.append(c)
+        if not pile and not chaine and len(sortie) > 1:
+            break
+    if not pile and not ecartees:
         raise ValueError("JSON illisible")
-    complete = repare + ('"' if chaine else "") + "".join(reversed(pile))
+    complete = "".join(sortie) + ('"' if chaine else "") + "".join(reversed(pile))
     return json.JSONDecoder().raw_decode(_VIRGULE_FINALE.sub(r"\1", complete))
 
 
@@ -863,8 +872,8 @@ def _appel_brut(t, noms):
         if cle in f:
             args = f[cle]
             break
-    else:
-        args = {}
+    else:  # arguments à plat à côté du nom (DeepSeek) : {"name": "Read", "file_path": "x"}
+        args = {k: v for k, v in f.items() if k not in ("name", "type", "id", "function", "tool")}
     if isinstance(args, str):
         try:
             json.loads(args)
@@ -1100,8 +1109,24 @@ def messages_agent(corps):
     return msgs
 
 
-def deltas_agent(lignes, etat):
-    """Flux SSE de la route agents -> morceaux de texte (le raisonnement rs_ est écarté) ; l'état porte les jetons."""
+class OutilNatifTente(Exception):
+    """Le modèle de la route agents appelle un outil en natif chez Venice, qui ne connaît pas les outils du client.
+
+    Venice répond « Tool not found » au modèle et le laisse boucler jusqu'à ~10 tours dans la même réponse avant
+    un bilan d'échec (vu avec DeepSeek V4.1 Flash, 31/10/2026) : on coupe le flux dès la première tentative."""
+
+    def __init__(self, noms):
+        super().__init__(", ".join(noms) or "outil natif")
+        self.noms = noms
+
+
+GENERATION_OUTIL = "veniceai:tool_call_generation"
+
+
+def deltas_agent(lignes, etat, couper_natif=False):
+    """Flux SSE de la route agents -> morceaux de texte (le raisonnement rs_ est écarté) ; l'état porte les jetons.
+
+    `couper_natif` : lève OutilNatifTente au premier appel d'outil natif (événement veniceai:tool_call_generation)."""
     evenement = None
     for ligne in lignes:
         if ligne.startswith("event:"):
@@ -1111,6 +1136,11 @@ def deltas_agent(lignes, etat):
                 d = json.loads(ligne[5:])
             except ValueError:
                 continue
+            if couper_natif and (str(evenement).startswith(GENERATION_OUTIL) or (
+                    evenement == "response.output_item.added"
+                    and str((d.get("item") or {}).get("type", "")).startswith(GENERATION_OUTIL))):
+                noms = [str(o.get("name")) for o in d.get("detected_tools") or [] if isinstance(o, dict)]
+                raise OutilNatifTente(noms)
             if evenement == "response.output_text.delta":
                 if str(d.get("item_id", "")).startswith("rs_"):  # raisonnement : pas dans la réponse
                     continue
@@ -1124,10 +1154,10 @@ def deltas_agent(lignes, etat):
                 raise RuntimeError(f"Venice agent: {json.dumps(err, ensure_ascii=False)[:200]}")
 
 
-def lire_flux_agent(lignes):
+def lire_flux_agent(lignes, couper_natif=False):
     """Flux SSE de la route agents -> (texte, jetons totaux, système imposé par Venice compris)."""
     etat = {"jetons": 0}
-    return "".join(deltas_agent(lignes, etat)), etat["jetons"]
+    return "".join(deltas_agent(lignes, etat, couper_natif)), etat["jetons"]
 
 
 def reponse_agent(jeton, modele, corps):
@@ -1153,14 +1183,16 @@ def reponse_agent(jeton, modele, corps):
         return r.iter_lines(decode_unicode=True)
 
 
-def discuter_agent(jeton, modele, corps):
+def discuter_agent(jeton, modele, corps, couper_natif=False):
     """Appelle la route agents et lit le flux complet. Renvoie (texte, jetons)."""
-    return lire_flux_agent(reponse_agent(jeton, modele, corps))
+    return lire_flux_agent(reponse_agent(jeton, modele, corps), couper_natif)
 
 
-def lire_reponse(jeton, modele, corps):
+def lire_reponse(jeton, modele, corps, couper_natif=False):
     """Texte et jetons d'une réponse Venice : route agents ou chat classique selon le modèle."""
     if est_agent(modele):
+        if couper_natif:
+            return discuter_agent(jeton, modele, corps, couper_natif=True)
         return discuter_agent(jeton, modele, corps)
     return "".join(morceaux_contenu(discuter(jeton, corps))), 0
 
@@ -1547,20 +1579,22 @@ def usage_estime(contenu, appels, jetons=0, entree=None):
     return {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": total}
 
 
-def morceaux_source(jeton, modele, corps, etat, api=None):
+def morceaux_source(jeton, modele, corps, etat, api=None, couper_natif=False):
     """Morceaux de texte d'une réponse Venice en flux : API officielle, route agents ou chat classique."""
     if api is not None and modele.startswith(PREFIXE_API):
         return api.morceaux_emules(modele[len(PREFIXE_API):], corps, etat)
     if est_agent(modele):
-        return deltas_agent(reponse_agent(jeton, modele, corps), etat)
+        return deltas_agent(reponse_agent(jeton, modele, corps), etat, couper_natif)
     return morceaux_contenu(discuter(jeton, corps))
 
 
-def texte_source(jeton, modele, corps, api=None):
+def texte_source(jeton, modele, corps, api=None, couper_natif=False):
     """(texte, jetons) d'une réponse Venice complète."""
     if api is not None and modele.startswith(PREFIXE_API):
         etat = {"jetons": 0}
         return "".join(api.morceaux_emules(modele[len(PREFIXE_API):], corps, etat)), etat["jetons"]
+    if couper_natif:
+        return lire_reponse(jeton, modele, corps, couper_natif=True)
     return lire_reponse(jeton, modele, corps)
 
 
@@ -1582,10 +1616,14 @@ def evenements_chat(jeton, req, medias=None, flux=False, api=None):
         corps = imposer_outil(corps, impose or ", ".join(str(o.get("function", o).get("name")) for o in outils))
     if not modele.startswith(PREFIXE_API):
         corps = garder_contexte(modele, corps)
-    emis, jetons = [], 0
+    emis, jetons, natif_tente = [], 0, False
+    couper = bool(outils) and est_agent(modele) and not modele.startswith(PREFIXE_API)
     if not flux:
-        texte, jetons = texte_source(jeton, modele, corps, api)
-        contenu, appels = extraire_appels(texte, outils)
+        try:
+            texte, jetons = texte_source(jeton, modele, corps, api, couper_natif=couper)
+            contenu, appels = extraire_appels(texte, outils)
+        except OutilNatifTente:
+            texte, contenu, appels, natif_tente = "", None, None, True
     elif not outils:
         etat = {"jetons": 0}
         for morceau in morceaux_source(jeton, modele, corps, etat, api):
@@ -1595,24 +1633,42 @@ def evenements_chat(jeton, req, medias=None, flux=False, api=None):
         return
     else:
         etat, filtre, morceaux = {"jetons": 0}, FiltreAppel(), []
-        for morceau in morceaux_source(jeton, modele, corps, etat, api):
-            morceaux.append(morceau)
-            libre = filtre.pousser(morceau)
-            if libre:
-                emis.append(libre)
-                yield "texte", libre
+        try:
+            for morceau in morceaux_source(jeton, modele, corps, etat, api, couper_natif=couper):
+                morceaux.append(morceau)
+                libre = filtre.pousser(morceau)
+                if libre:
+                    emis.append(libre)
+                    yield "texte", libre
+        except OutilNatifTente:
+            natif_tente = True
         texte, jetons = "".join(morceaux), etat["jetons"]
-        retenu = filtre.reste()
+        retenu = None if natif_tente else filtre.reste()
         contenu, appels = extraire_appels(retenu, outils) if retenu else (None, None)
         if not appels:
             contenu = retenu or None
-    if outils and not appels and (obligatoire or refus_outils(texte)):
-        # Outil natif de Venice tenté (« Tool not found ») ou appel imposé non rendu : une relance corrective.
-        texte2, jetons2 = texte_source(jeton, modele, rappeler_correction(corps, outils), api)
-        contenu2, appels2 = extraire_appels(texte2, outils)
-        if appels2:
-            appels, jetons = appels2, jetons2
-            contenu = contenu2 if not flux else None  # en flux, le premier texte est déjà parti
+    if outils and not appels and (obligatoire or natif_tente or refus_outils(texte)):
+        # Outil natif de Venice tenté (« Tool not found ») ou appel imposé non rendu : relance corrective, deux fois
+        # si le flux a été coupé sur un appel natif (aucun texte n'est alors parti chez le client).
+        for _ in range(RELANCES_NATIF if natif_tente else 1):
+            try:
+                texte2, jetons2 = texte_source(jeton, modele, rappeler_correction(corps, outils), api,
+                                               couper_natif=couper)
+            except OutilNatifTente:
+                continue
+            contenu2, appels2 = extraire_appels(texte2, outils)
+            if appels2:
+                appels, jetons = appels2, jetons2
+                contenu = contenu2 if not flux or natif_tente else None  # en flux, le premier texte est déjà parti
+                break
+            if natif_tente and texte2:  # réponse en prose sans appel : on la rend telle quelle
+                contenu, jetons = contenu2 or texte2, jetons2
+                break
+        else:
+            if natif_tente:
+                print(f"{modele} : appels d'outils natifs de Venice malgré les relances", file=sys.stderr, flush=True)
+                contenu = (f"[pont] {modele} a tenté d'appeler ses outils natifs chez Venice au lieu de répondre au "
+                           "format demandé, malgré les relances. Réessayez, ou prenez kimi-k2-5 pour les agents de code.")
     appels = _limiter_appels(appels, req)
     if contenu:
         emis.append(contenu)

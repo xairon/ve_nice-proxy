@@ -6,7 +6,12 @@
 - **`venice-delegue`** : donne des fichiers et une consigne à un modèle du pont **sans déclarer d'outil**, applique ses blocs « chercher / remplacer », lance la commande de test et renvoie les échecs au modèle (3 tours par défaut). Formats `texte` et `json` aussi. Raison : DeepSeek V4.1 Flash échoue comme agent à outils sur la route agents de Venice, mais sans outil il a corrigé le projet d'essai en une requête (4 s, 6/6 tests, 0 crédit, 31/10/2026). Garde de chemin : aucune écriture hors du dossier de travail.
 
 ### Vérifié en réel (31/10/2026)
+- **aider + DeepSeek V4.1 Flash Uncensored** : sans outils, sur ce dépôt (109k jetons envoyés), renommage transversal en 66 s, 263 tests verts, 0 crédit ; kimi-k2-5 réussit aussi en 137 s. `venice-setup harness aider` imprime la recette (DeepSeek par défaut) et `gabarits/aider/aider.model.metadata.json` annonce les vraies fenêtres (500k / 250k).
 - **Claude Code 2.1.312 contre le vrai Venice** (`kimi-k2-5`, pont `main`) : lecture, édition et lancement de pytest par les outils émulés, bogue corrigé, tests verts, 0 crédit. `venice-setup harness claude-code` et `docs/HARNESS.md` le disent.
+
+### Corrigé (31/10/2026, DeepSeek V4.1 Flash et les outils)
+- Cause trouvée en rejouant une vraie requête de Claude Code : sur la route agents, DeepSeek appelle les outils en **natif** ; la boucle d'agent interne de Venice ne les connaît pas (`veniceai:tool_call_generation`, outils `Unrecognized`), répond « Tool not found » au modèle et le laisse réessayer jusqu'à ~10 fois dans la même réponse avant un bilan d'échec. Le pont coupe maintenant le flux dès le premier appel natif et relance aussitôt avec la consigne corrective (deux fois au plus), avant que rien ne parte chez le client ; à défaut, un message clair remplace le bilan d'échec.
+- Appels d'outil mal formés acceptés : arguments à plat à côté du nom (`{"name":"Read","file_path":"x"}`) et accolade fermante en trop.
 
 ### Corrigé (31/10/2026, relevé pendant l'essai réel)
 - `venice-setup status` sans fichier de secrets disait « Pont injoignable » alors que le pont répondait : il dit maintenant que le fichier de secrets manque.

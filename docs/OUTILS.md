@@ -139,3 +139,21 @@ venice-delegue "Liste les fonctions publiques" -f module.py --format json
 - Avec `--test`, la sortie des tests en échec est renvoyée au modèle avec l'état des fichiers, jusqu'à `--tours` (3).
 - Aucune écriture hors de `--racine` ; `--dry-run` affiche la réponse sans rien écrire.
 - Modèle par défaut : `deepseek-v4-1-flash-uncensored` (`-m` ou `VENICE_DELEGUE_MODELE` pour un autre). Un agent (Claude Code avec Kimi) peut l'appeler par son outil Bash pour confier un gros morceau de code à DeepSeek.
+
+### En outil MCP : `venice-mcp`
+
+`venice-mcp` expose la même chose comme **outil MCP** (stdio, bibliothèque standard), pour que l'agent s'en serve de lui-même :
+
+- `deepseek_coder(consigne, fichiers, test?, tours?, racine?)` : DeepSeek écrit, le serveur applique et teste, l'agent reçoit les fichiers modifiés et le résultat des tests ;
+- `deepseek_demander(question, fichiers?, racine?)` : lecture ou analyse sans rien modifier.
+
+```bash
+# Claude Code (venice-setup harness claude-code imprime ces lignes avec vos chemins)
+claude mcp add -e VENICE_PONT_URL=http://127.0.0.1:8700/v1 -e VENICE_PONT_ENV=~/.config/venice-setup/defaut/venice.env \
+  --scope user deepseek -- python3 /chemin/ve_nice-proxy/venice-mcp
+cat gabarits/claude-code/CLAUDE.deepseek.md >> ~/.claude/CLAUDE.md   # la consigne « confie le code à DeepSeek »
+```
+
+OpenCode : dans `opencode.json`, `"mcp": {"deepseek": {"type": "local", "command": ["python3", "/chemin/venice-mcp"], "environment": {"VENICE_PONT_ENV": "…"}}}` et la même consigne dans `AGENTS.md`.
+
+La clé est lue dans le fichier de secrets (`VENICE_PONT_ENV`) et n'est jamais copiée dans la configuration du client. Partage des rôles : l'agent (Kimi ou un vrai Claude) explore, choisit les fichiers, relit ; DeepSeek écrit, avec sa grande fenêtre et sans censure.

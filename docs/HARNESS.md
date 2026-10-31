@@ -143,6 +143,10 @@ Essai antérieur (31/10/2026) : **Claude Code 2.1.316** en `claude -p "Crée bon
 
 Variante **testée** via OmniRoute (28/10/2026, `claude -p … --model ven-kimi` → `pong`) : `ANTHROPIC_BASE_URL=http://127.0.0.1:20128`, `ANTHROPIC_API_KEY="$OMNIROUTE_CLE"`.
 
+### Claude Code chef, DeepSeek au clavier
+
+`venice-setup harness claude-code` imprime aussi deux lignes à lancer une fois : l'outil MCP `venice-mcp` (`claude mcp add … deepseek`) et la consigne `gabarits/claude-code/CLAUDE.deepseek.md`. Claude Code explore et relit, et confie chaque écriture de code à DeepSeek V4.1 Flash Uncensored (gratuit, ~500k) par l'outil `deepseek_coder`, qui applique et teste. Détails : [OUTILS.md](OUTILS.md#en-outil-mcp--venice-mcp).
+
 ### claude-code-router (non testé, plus nécessaire)
 
 Projet tiers (<https://github.com/musistudio/claude-code-router>), configuré dans `~/.claude-code-router/config.json` : un fournisseur dont `api_base_url` est l'URL **complète** `http://127.0.0.1:8700/v1/chat/completions`, `api_key` = clé du pont, `models: ["kimi-k2-5"]`, et un bloc `Router` qui désigne `"default": "venice,kimi-k2-5"` ; lancement par `ccr code`. Non essayé ici : préférez OmniRoute, déjà en place et testé.

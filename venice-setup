@@ -377,7 +377,13 @@ export ANTHROPIC_MODEL={m}
 export ANTHROPIC_DEFAULT_HAIKU_MODEL=qwen-3-8-27b       # tâches de fond (titres, résumés) : rapide
 export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1       # moins de requêtes annexes : le pont plafonne à 20/min
 claude
-# Variante OmniRoute (testée) : ANTHROPIC_BASE_URL=http://127.0.0.1:20128, ANTHROPIC_API_KEY=$OMNIROUTE_CLE, --model ven-kimi.""")
+# Variante OmniRoute (testée) : ANTHROPIC_BASE_URL=http://127.0.0.1:20128, ANTHROPIC_API_KEY=$OMNIROUTE_CLE, --model ven-kimi.
+
+# Confier l'ÉCRITURE du code à DeepSeek V4.1 Flash Uncensored (gratuit, ~500k de contexte) : une fois pour toutes,
+# l'outil MCP (la clé est lue dans le fichier de secrets, jamais copiée) puis la consigne qui dit de s'en servir.
+claude mcp add -e VENICE_PONT_URL={u} -e VENICE_PONT_ENV={p['env']} --scope user deepseek -- python3 {ICI}/venice-mcp
+cat {ICI}/gabarits/claude-code/CLAUDE.deepseek.md >> ~/.claude/CLAUDE.md   # ou >> CLAUDE.md d'un seul projet
+export MCP_TOOL_TIMEOUT=1800000                         # une délégation avec tests peut durer quelques minutes""")
     elif n == "aider":
         print(f"""# aider n'utilise PAS d'appels d'outils : le modèle écrit ses modifications (blocs SEARCH/REPLACE) et aider
 # les applique. C'est ce qui permet DeepSeek V4.1 Flash (route agents, ~500k de contexte) : avec des outils, la boucle

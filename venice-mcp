@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+"""venice-mcp : serveur MCP (stdio) qui permet à Claude Code ou OpenCode de confier l'écriture du code à DeepSeek.
+
+L'agent (Claude Code avec Kimi, ou un vrai Claude) garde l'exploration et les tests ; quand il faut écrire du code,
+il appelle l'outil `deepseek_coder` : ce serveur passe la tâche et les fichiers à DeepSeek V4.1 Flash Uncensored SANS
+outils (seule façon dont il marche sur Venice), applique ses blocs de modification et lance les tests. C'est
+`venice-delegue` exposé comme outil.
+
+    claude mcp add deepseek -e VENICE_PONT_ENV=~/.config/venice-setup/defaut/venice.env -- python3 /chemin/venice-mcp
+
+Connexion : VENICE_PONT_URL (défaut http://127.0.0.1:8700/v1) et VENICE_PONT_CLE, ou VENICE_PONT_ENV = fichier de
+secrets du pont d'où lire VENICE_PONT_CLE (jamais affichée). Bibliothèque standard seule.
+"""
+from __future__ import annotations
+
+import argparse
+import contextlib
+import importlib.machinery
+import importlib.util
+import io
+import json
+import os
+import sys
+from pathlib import Path
+
+ICI = Path(__file__).resolve().parent
+VERSION = "1.0"
+
+
+def _charger_delegue():
+    loader = importlib.machinery.SourceFileLoader("venice_delegue", str(ICI / "venice-delegue"))
+    spec = importlib.util.spec_from_loader("venice_delegue", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+vd = _charger_delegue()
+
+_FICHIERS = {"type": "array", "items": {"type": "string"},
+             "description": "Chemins (relatifs au dossier de travail) de TOUS les fichiers utiles : ceux à modifier et "
+                            "ceux à lire pour comprendre. DeepSeek ne voit rien d'autre. Fenêtre ~500k jetons : "
+                            "n'hésitez pas à en donner beaucoup."}
+_RACINE = {"type": "string", "description": "Dossier de travail (absolu). Défaut : le dossier courant du serveur. "
+                                            "Aucune écriture en dehors."}
+
+OUTILS = [
+    {
+        "name": "deepseek_coder",
+        "description": (
+            "Confie l'ÉCRITURE de code à DeepSeek V4.1 Flash Uncensored (gratuit, ~500k de contexte, non censuré). "
+            "Il reçoit la consigne et le contenu des fichiers, renvoie des modifications que ce serveur applique "
+            "directement sur le disque, puis lance la commande de test si elle est donnée et lui renvoie les échecs "
+            "(jusqu'à `tours` allers-retours). Renvoie les fichiers modifiés et le résultat des tests. Relisez le "
+            "diff (git diff) ensuite."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "consigne": {"type": "string", "description": "La tâche, précise et complète (quoi changer, où, "
+                                                              "contraintes, style)."},
+                "fichiers": _FICHIERS,
+                "test": {"type": "string", "description": "Commande de vérification lancée dans le dossier de "
+                                                          "travail, ex. \"pytest -q tests/test_x.py\"."},
+                "tours": {"type": "integer", "minimum": 1, "maximum": 6, "default": 3},
+                "racine": _RACINE,
+            },
+            "required": ["consigne", "fichiers"],
+        },
+    },
+    {
+        "name": "deepseek_demander",
+        "description": (
+            "Pose une question à DeepSeek V4.1 Flash Uncensored sur des fichiers (analyse, revue, explication, "
+            "plan) sans rien modifier. Utile pour lire beaucoup de code d'un coup (~500k de contexte)."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string"},
+                "fichiers": _FICHIERS,
+                "racine": _RACINE,
+            },
+            "required": ["question"],
+        },
+    },
+]
+
+
+def connexion() -> tuple[str, str]:
+    cle = os.environ.get("VENICE_PONT_CLE", "")
+    env = os.environ.get("VENICE_PONT_ENV")
+    if not cle and env:
+        try:
+            for ligne in Path(env).expanduser().read_text().splitlines():
+                if ligne.startswith("VENICE_PONT_CLE="):
+                    cle = ligne.split("=", 1)[1].strip().strip('"').strip("'")
+        except OSError as e:
+            raise vd.Erreur(f"fichier de secrets illisible ({type(e).__name__}) : {env}") from None
+    if not cle:
+        raise vd.Erreur("VENICE_PONT_CLE manquante : passez -e VENICE_PONT_ENV=<fichier de secrets du pont>.")
+    return os.environ.get("VENICE_PONT_URL", vd.URL_DEFAUT), cle
+
+
+def appeler(nom: str, args: dict) -> tuple[str, bool]:
+    """Exécute un outil ; renvoie (texte, est_erreur)."""
+    if nom not in ("deepseek_coder", "deepseek_demander"):
+        return f"Outil inconnu : {nom}", True
+    racine = Path(args.get("racine") or os.getcwd()).expanduser()
+    if not racine.is_dir():
+        return f"Dossier de travail introuvable : {racine}", True
+    coder = nom == "deepseek_coder"
+    a = argparse.Namespace(
+        consigne=args.get("consigne" if coder else "question") or "",
+        fichier=[str(f) for f in args.get("fichiers") or []],
+        modele=os.environ.get("VENICE_DELEGUE_MODELE", vd.MODELE_DEFAUT),
+        format="modifs" if coder else "texte",
+        test=args.get("test") if coder else None,
+        tours=max(1, min(int(args.get("tours") or 3), 6)),
+        racine=str(racine), dry_run=False)
+    if not a.consigne.strip():
+        return "Consigne vide.", True
+    sortie, journal = io.StringIO(), io.StringIO()
+    try:
+        url, cle = connexion()
+        with contextlib.redirect_stdout(sortie):
+            code = vd.deleguer(a, url, cle, journal=journal)
+    except vd.Erreur as e:
+        return f"Erreur : {e}", True
+    texte = "\n".join(t for t in (journal.getvalue().strip(), sortie.getvalue().strip()) if t)
+    if code != 0 and a.test:
+        _, fin = vd.lancer_test(a.test, racine)
+        texte += f"\n\nDernière sortie de `{a.test}` :\n{fin[-3000:]}"
+    return texte or "(réponse vide)", code != 0
+
+
+def traiter(msg: dict) -> dict | None:
+    """Une requête JSON-RPC → sa réponse (None pour une notification)."""
+    mid, methode = msg.get("id"), msg.get("method")
+    if mid is None:
+        return None
+    if methode == "initialize":
+        version = (msg.get("params") or {}).get("protocolVersion") or "2025-06-18"
+        res = {"protocolVersion": version, "capabilities": {"tools": {}},
+               "serverInfo": {"name": "venice-deepseek", "version": VERSION},
+               "instructions": "Confiez l'écriture de code à deepseek_coder ; gardez l'exploration et la relecture."}
+    elif methode == "ping":
+        res = {}
+    elif methode == "tools/list":
+        res = {"tools": OUTILS}
+    elif methode == "tools/call":
+        p = msg.get("params") or {}
+        texte, erreur = appeler(p.get("name", ""), p.get("arguments") or {})
+        res = {"content": [{"type": "text", "text": texte}], "isError": erreur}
+    else:
+        return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32601, "message": f"Méthode inconnue : {methode}"}}
+    return {"jsonrpc": "2.0", "id": mid, "result": res}
+
+
+def main(entree=None, sortie=None) -> int:
+    entree, sortie = entree or sys.stdin, sortie or sys.stdout
+    for ligne in entree:
+        if not ligne.strip():
+            continue
+        try:
+            msg = json.loads(ligne)
+        except ValueError:
+            rep = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "JSON invalide"}}
+        else:
+            rep = traiter(msg) if isinstance(msg, dict) else None
+        if rep is not None:
+            sortie.write(json.dumps(rep, ensure_ascii=False) + "\n")
+            sortie.flush()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

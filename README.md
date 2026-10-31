@@ -149,6 +149,7 @@ Génération vidéo ou musique, édition d'image, audio ou vidéo en entrée d'u
 ```
 venice-setup          CLI (Python, bibliothèque standard seule)
 venice-delegue        confier une tâche de code à un modèle SANS outils (DeepSeek), appliquer et tester
+venice-mcp            le même, en outil MCP : Claude Code / OpenCode confient l'écriture du code à DeepSeek tout seuls
 pont/                 le pont (venice_pont.py), les traductions Anthropic et Responses (formats.py), tests, ROUTES.md, bancs
 gabarits/             unité systemd, env.example, gabarits OmniRoute
 docs/                 la documentation

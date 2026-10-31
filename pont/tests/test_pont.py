@@ -760,7 +760,7 @@ def test_relance_corrective_quand_le_modele_croit_n_avoir_aucun_outil(monkeypatc
                      ('{"tool_calls":[{"name":"get_time","arguments":{}}]}', 20)])
     corps_envoyes = []
 
-    def faux_discuter_agent(jeton, modele, corps):
+    def faux_discuter_agent(jeton, modele, corps, couper_natif=False):
         corps_envoyes.append(corps)
         return next(reponses)
 
@@ -798,3 +798,76 @@ def test_journal_desactivable(serveur, capsys, monkeypatch):
     requete, *_ = serveur
     requete("/health")
     assert "/health" not in capsys.readouterr().err
+
+
+# --- Appels d'outils natifs de la route agents (DeepSeek V4.1 Flash, 31/10/2026) ---------------------------------
+
+FLUX_NATIF = [
+    "event: response.output_item.added",
+    'data: {"item":{"id":"tcg_agent-node:llm:0","type":"veniceai:tool_call_generation"}}', "",
+    "event: veniceai:tool_call_generation.in_progress",
+    'data: {"item_id":"tcg_agent-node:llm:0","detected_tools":[{"type":"Unrecognized","name":"Bash"}]}', "",
+    "event: response.output_text.delta", 'data: {"item_id":"agent-node:llm:wrap_up","delta":"Tout a échoué"}', "",
+]
+
+
+def test_flux_agent_coupe_au_premier_appel_natif():
+    with pytest.raises(vp.OutilNatifTente) as e:
+        vp.lire_flux_agent(FLUX_NATIF, couper_natif=True)
+    assert e.value.noms == [] or "Bash" in e.value.noms
+
+
+def test_flux_agent_sans_coupure_garde_l_ancien_comportement():
+    assert vp.lire_flux_agent(FLUX_NATIF)[0] == "Tout a échoué"
+
+
+def _appel_chat(monkeypatch, sequence, flux=False):
+    """Fait passer une requête outillée sur la route agents ; `sequence` : liste de FLUX SSE (un par appel)."""
+    restants = iter(sequence)
+    corps_envoyes = []
+
+    def fausse_reponse_agent(jeton, modele, corps):
+        corps_envoyes.append(corps)
+        return iter(next(restants))
+
+    monkeypatch.setattr(vp, "reponse_agent", fausse_reponse_agent)
+    req = {"model": "deepseek-v4-1-flash-uncensored", "messages": [{"role": "user", "content": "heure ?"}],
+           "tools": OUTILS}
+    return vp.collecter(vp.evenements_chat(_JetonVide(), req, flux=flux)), corps_envoyes
+
+
+def _flux_texte(texte):
+    return ["event: response.output_text.delta",
+            "data: " + json.dumps({"item_id": "agent-node:llm:0", "delta": texte}), ""]
+
+
+@pytest.mark.parametrize("flux", [False, True])
+def test_appel_natif_relance_tout_de_suite_avec_correction(monkeypatch, flux):
+    (contenu, appels, fin), corps = _appel_chat(
+        monkeypatch, [FLUX_NATIF, _flux_texte('{"tool_calls":[{"name":"get_time","arguments":{}}]}')], flux)
+    assert appels and appels[0]["function"]["name"] == "get_time"
+    assert fin["raison"] == "tool_calls"
+    assert not contenu or "échoué" not in contenu  # le bilan d'échec de Venice n'est jamais relayé
+    assert len(corps) == 2 and "CORRECTION" in corps[1]["systemPrompt"]
+
+
+def test_appel_natif_deux_relances_puis_message_clair(monkeypatch):
+    (contenu, appels, fin), corps = _appel_chat(monkeypatch, [FLUX_NATIF, FLUX_NATIF, FLUX_NATIF], flux=True)
+    assert appels is None
+    assert len(corps) == 1 + vp.RELANCES_NATIF
+    assert "[pont]" in contenu and "kimi-k2-5" in contenu
+
+
+def test_appel_natif_puis_reponse_en_prose(monkeypatch):
+    (contenu, appels, _), _ = _appel_chat(monkeypatch, [FLUX_NATIF, _flux_texte("Il est midi.")])
+    assert appels is None and contenu == "Il est midi."
+
+
+def test_appel_sans_cle_arguments_et_accolade_en_trop():
+    """Forme rendue par DeepSeek au rejeu du 31/10/2026 : arguments à plat et une accolade de trop."""
+    outils = [{"type": "function", "function": {"name": "Read", "parameters": {}}}]
+    texte = ('{"tool_calls": [{"name": "Read", "arguments": {"file_path": "a.py"}}, '
+             '{"name": "Read", "file_path": "b.py"}}, {"name": "Read", "file_path": "c.py"}}]}')
+    _, appels = vp.extraire_appels(texte, outils)
+    assert [json.loads(a["function"]["arguments"]) for a in appels] == [
+        {"file_path": "a.py"}, {"file_path": "b.py"}, {"file_path": "c.py"}]

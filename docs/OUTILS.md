@@ -9,7 +9,7 @@ Comment le pont fait utiliser des outils (lire un fichier, lancer une commande, 
 | Quels clients ? | Tout client **chat completions** (OpenCode, aider, Cline, Continue…), **Claude Code** par `/v1/messages` (format Anthropic) et **Codex CLI** par `/v1/responses` (format Responses), directement sur le pont depuis le 31/10/2026. |
 | Tool calling natif ? | **Non** sur le chemin web (cookie `__client`) : les définitions sont **émulées dans le prompt** et la réponse est retransformée en appels d'outil du format du client. **Oui** sur l'API officielle (modèles `api/…`, clé API, facturée à l'usage) pour les modèles qui l'annoncent. |
 | Pourquoi pas natif sur le web ? | La route agents de Venice accepte `clientTools` mais ne les présente pas au modèle (mesuré le 30/10/2026, six formes essayées). |
-| Fiabilité de l'émulation | Bonne sur DeepSeek V4.1 Flash et Kimi K2.5 depuis la relance corrective du 30/10/2026 ; le pont reconnaît aussi les formats que les modèles produisent d'eux-mêmes (voir plus bas). |
+| Fiabilité de l'émulation | **Kimi K2.5 : bonne** (essai réel du 31/10/2026 avec Claude Code, 0 échec d'outil). **DeepSeek V4.1 Flash : fragile** : il appelle souvent les outils en natif, la boucle d'agent de Venice répond « Tool not found » ; le pont coupe le flux à la première tentative et relance avec une consigne corrective (31/10/2026, efficacité en réel à confirmer). Le pont reconnaît aussi les formats que les modèles produisent d'eux-mêmes (voir plus bas). |
 | Flux | **Réel**, y compris avec des outils : la prose part au fil de l'eau, seul l'appel d'outil est retenu jusqu'à ce qu'il soit complet. |
 
 ## Ce qui se passe concrètement (chemin web)

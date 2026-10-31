@@ -138,7 +138,7 @@ Windows : les tests du pont passent sur le runner Windows de la CI (28/10/2026),
 | `harness NOM [--modele M] [--appliquer]` | configuration pour un client (`opencode`, `openai`, `omniroute`, `hermes`, `openwebui`, `aider`, `cline`, `continue`, `codex`, `claude-code`) |
 | `profils` | liste les profils (un profil = un compte = un pont) |
 
-Tests : `python -m pytest tests pont/tests` (263 tests, aucun appel réseau).
+Tests : `python -m pytest tests pont/tests` (274 tests, aucun appel réseau).
 
 ## Ce qui n'est pas pris en charge
 
@@ -148,6 +148,7 @@ Génération vidéo ou musique, édition d'image, audio ou vidéo en entrée d'u
 
 ```
 venice-setup          CLI (Python, bibliothèque standard seule)
+venice-delegue        confier une tâche de code à un modèle SANS outils (DeepSeek), appliquer et tester
 pont/                 le pont (venice_pont.py), les traductions Anthropic et Responses (formats.py), tests, ROUTES.md, bancs
 gabarits/             unité systemd, env.example, gabarits OmniRoute
 docs/                 la documentation

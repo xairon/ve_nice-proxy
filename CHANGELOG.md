@@ -2,6 +2,9 @@
 
 ## Non publié
 
+### Ajouté (31/10/2026 : DeepSeek sans outils)
+- **`venice-delegue`** : donne des fichiers et une consigne à un modèle du pont **sans déclarer d'outil**, applique ses blocs « chercher / remplacer », lance la commande de test et renvoie les échecs au modèle (3 tours par défaut). Formats `texte` et `json` aussi. Raison : DeepSeek V4.1 Flash échoue comme agent à outils sur la route agents de Venice, mais sans outil il a corrigé le projet d'essai en une requête (4 s, 6/6 tests, 0 crédit, 31/10/2026). Garde de chemin : aucune écriture hors du dossier de travail.
+
 ### Vérifié en réel (31/10/2026)
 - **Claude Code 2.1.312 contre le vrai Venice** (`kimi-k2-5`, pont `main`) : lecture, édition et lancement de pytest par les outils émulés, bogue corrigé, tests verts, 0 crédit. `venice-setup harness claude-code` et `docs/HARNESS.md` le disent.
 

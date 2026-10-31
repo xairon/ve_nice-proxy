@@ -6,6 +6,7 @@
 - **`venice-delegue`** : donne des fichiers et une consigne à un modèle du pont **sans déclarer d'outil**, applique ses blocs « chercher / remplacer », lance la commande de test et renvoie les échecs au modèle (3 tours par défaut). Formats `texte` et `json` aussi. Raison : DeepSeek V4.1 Flash échoue comme agent à outils sur la route agents de Venice, mais sans outil il a corrigé le projet d'essai en une requête (4 s, 6/6 tests, 0 crédit, 31/10/2026). Garde de chemin : aucune écriture hors du dossier de travail.
 
 ### Ajouté (31/10/2026)
+- **Mode Venice sur demande** : `gabarits/claude-code/CLAUDE.venice-mode.md` + commande `/venice` ; « utilise venice » bascule la session vers DeepSeek, « arrête venice » revient.
 - **`venice-mcp`** : serveur MCP (stdio, bibliothèque standard) avec les outils `deepseek_coder` (DeepSeek écrit, le serveur applique et teste) et `deepseek_demander`. Avec la consigne `gabarits/claude-code/CLAUDE.deepseek.md`, Claude Code (ou OpenCode) confie de lui-même l'écriture du code à DeepSeek. `venice-setup harness claude-code` imprime les deux lignes d'installation. Testé en réel : Kimi a délégué la correction à DeepSeek (1 appel, 0 Edit/Write de sa part), tests verts, 28 s, 0 crédit.
 
 ### Vérifié en réel (31/10/2026)

@@ -168,6 +168,9 @@ def appel(p: dict, chemin: str, delai: float = 8) -> dict:
 
 def cmd_status(a) -> int:
     p = profil(a.profil)
+    if not Path(p["env"]).exists():
+        print(f"Fichier de secrets absent : {p['env']}. venice-setup login --profil {a.profil} ?")
+        return 1
     try:
         h = appel(p, "/health")
     except Exception as e:
@@ -319,8 +322,8 @@ HARNAIS = {
     "continue": ("NON TESTÉ", None),
     "codex": ("TESTÉ via OmniRoute (ven-kimi) ; direct sur le pont (/v1/responses, 31/10/2026) : vérifié avec le SDK OpenAI "
               "et les tests, Codex CLI lui-même non lancé en direct", None),
-    "claude-code": ("TESTÉ en direct sur le pont (/v1/messages, Claude Code 2.1.316, écriture de fichier par l'outil Write, "
-                    "réponses du modèle simulées, 31/10/2026) ; TESTÉ via OmniRoute (ven-kimi, 'pong')", None),
+    "claude-code": ("TESTÉ en direct contre Venice (/v1/messages, Claude Code 2.1.312, kimi-k2-5, 31/10/2026 : "
+                    "Glob, Read, Edit, Bash, bogue corrigé et pytest vert, 0 crédit) ; TESTÉ via OmniRoute (ven-kimi, 'pong')", None),
 }
 
 

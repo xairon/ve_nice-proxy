@@ -8,6 +8,8 @@ journalctl --user -u venice-pont -n 50 --no-pager     # (venice-pont-<profil> po
 systemctl --user status venice-pont
 ```
 
+Le journal porte une ligne par requête (`POST /v1/messages 200`) : méthode, chemin sans paramètres et code, jamais d'en-tête ni de contenu (`VENICE_PONT_JOURNAL=0` pour la couper).
+
 | Symptôme | Cause | Remède |
 |---|---|---|
 | `Pont injoignable … Connection refused` | service arrêté ou autre port | `systemctl --user start venice-pont` ; `./venice-setup profils` pour voir le port du profil ; port déjà pris : `ss -ltn \| grep 8700` |

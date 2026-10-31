@@ -1658,6 +1658,7 @@ GRATUITS = set(filter(None, os.environ.get(
     "venice-uncensored-role-play,aion-labs-aion-3-0,deepseek-v4-1-flash-uncensored,kimi-k2-5,"
     "qwen3-6-27b,qwen3-5-35b-a3b,google-gemma-4-26b-a4b-it,google-gemma-4-31b-it,qwen3-vl-235b-a22b").split(",")))
 AUTORISER_PAYANTS = os.environ.get("VENICE_PONT_AUTORISER_PAYANTS") == "1"
+JOURNAL = os.environ.get("VENICE_PONT_JOURNAL", "1") != "0"  # une ligne par requête sur stderr
 
 # Modèles qui lisent une image sans débit (28/10/2026 : un dessin décrit par chacun, solde 285 avant et après).
 # venice-uncensored-role-play renvoie une 500 avec une image ; la route agents (Kimi, DeepSeek) n'a pas de vision ici.
@@ -2022,6 +2023,12 @@ def fabriquer_handler(jeton, cle_pont, source=None, limiteur=None, suivi=None, l
 
         def log_message(self, *a):
             pass
+
+        def log_request(self, code="-", size="-"):
+            # Méthode, chemin sans paramètres (ils peuvent porter un secret) et code : jamais d'en-têtes ni de corps.
+            if JOURNAL:
+                chemin = (getattr(self, "path", "") or "").split("?", 1)[0]
+                print(f"{self.command} {chemin} {getattr(code, 'value', code)}", file=sys.stderr, flush=True)
 
         def _json(self, code, obj, entetes=None):
             self._octets(code, json.dumps(obj, ensure_ascii=False).encode(), "application/json; charset=utf-8", entetes)

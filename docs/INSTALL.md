@@ -108,6 +108,7 @@ Chaque fichier modifié par `harness opencode --appliquer` est sauvegardé juste
 | `VENICE_PONT_MAX_PAR_MIN` | plafond de requêtes par minute | `20` |
 | `VENICE_PONT_GRATUITS` | liste blanche des modèles (séparés par des virgules) | modèles sans pièce relevés le 28/10/2026 |
 | `VENICE_PONT_AUTORISER_PAYANTS` | `1` : accepte les modèles payants (**débite des crédits**) | non |
+| `VENICE_PONT_JOURNAL` | `0` : coupe la ligne écrite dans le journal à chaque requête (méthode, chemin sans paramètres, code) | `1` |
 
 Écouter ailleurs que sur `127.0.0.1` (par exemple l'adresse d'un VPN privé pour qu'une autre machine du réseau utilise le pont) est possible, mais le pont n'a ni TLS ni autre protection que sa clé : ne jamais l'exposer à Internet ([SECURITE.md](SECURITE.md)).
 

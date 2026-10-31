@@ -16,7 +16,7 @@ Deux familles :
 | Hermes Agent v0.22.2 | **TESTÉ via OmniRoute** ; branchement direct : format conforme au schéma de config, non lancé | OmniRoute |
 | Open WebUI v0.11.4 | **TESTÉ via OmniRoute** (authentification vérifiée, chat réel) ; direct sur le pont : même réglage, non lancé | OmniRoute |
 | Codex CLI 0.162.1 | **TESTÉ via OmniRoute** (`codex exec`, `pong` sur `ven-kimi`) ; **direct** (`/v1/responses`, 31/10/2026) : vérifié avec le SDK OpenAI, Codex lui-même **non lancé** | pont direct, ou OmniRoute |
-| Claude Code 2.1.316 | **TESTÉ en direct** (31/10/2026, `/v1/messages` : appel `Write` émulé, fichier écrit ; réponses du modèle simulées) ; **TESTÉ via OmniRoute** (2.1.312, `pong` sur `ven-kimi`) | pont direct, ou OmniRoute |
+| Claude Code 2.1.312 | **TESTÉ en direct contre Venice** (31/10/2026, `/v1/messages`, `kimi-k2-5` : Glob, Read, Edit, Bash, bogue corrigé, pytest vert, 0 crédit) ; **TESTÉ via OmniRoute** (2.1.312, `pong` sur `ven-kimi`) | pont direct, ou OmniRoute |
 | claude-code-router | **NON TESTÉ** (plus nécessaire : le pont parle `/v1/messages`) | pont direct |
 | aider | **NON TESTÉ** : installation impossible sur la machine d'essai (Python 3.13, dépendances sans roue précompilée) | pont direct |
 | Cline, Continue | **NON TESTÉ** (extensions d'éditeur, non installées) | pont direct |
@@ -137,7 +137,9 @@ export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1          # moins de requêtes 
 claude
 ```
 
-Testé (31/10/2026) : **Claude Code 2.1.316** en `claude -p "Crée bonjour.txt contenant salut" --allowedTools Write`, pont réel, **réponses du modèle simulées** (pas d'accès à Venice depuis la machine d'essai) : Claude Code a reçu l'appel `Write` émulé, écrit le fichier, renvoyé le résultat, puis affiché la réponse finale. Le prompt système de Claude Code (outils compris) pesait ~74 000 caractères, d'où le choix de `kimi-k2-5` : sur le chat classique, la garde de contexte du pont refuse vite avec « prompt is too long » (au lieu de la troncature silencieuse qui donnait des réponses hors sujet le 28/10/2026). Sans `ANTHROPIC_MODEL`, les noms `claude-*` sont réécrits vers `kimi-k2-5` (et `claude-*haiku*` vers `qwen-3-8-27b`).
+**Testé contre le vrai Venice** (31/10/2026) : **Claude Code 2.1.312** en `claude -p`, `kimi-k2-5`, configuration de `venice-setup harness claude-code`, sur un petit projet Python dont un test échouait : en 20 s et 6 tours, Claude Code a enchaîné Glob, Read ×2, Edit et Bash (`pytest -v`), corrigé le bogue sans toucher aux tests, et `pytest` est passé (2/2). Aucune erreur du pont, solde inchangé (285 → 285). Seul avertissement du client, sans effet : `unrecognized_model`.
+
+Essai antérieur (31/10/2026) : **Claude Code 2.1.316** en `claude -p "Crée bonjour.txt contenant salut" --allowedTools Write`, pont réel, **réponses du modèle simulées** (pas d'accès à Venice depuis la machine d'essai) : Claude Code a reçu l'appel `Write` émulé, écrit le fichier, renvoyé le résultat, puis affiché la réponse finale. Le prompt système de Claude Code (outils compris) pesait ~74 000 caractères, d'où le choix de `kimi-k2-5` : sur le chat classique, la garde de contexte du pont refuse vite avec « prompt is too long » (au lieu de la troncature silencieuse qui donnait des réponses hors sujet le 28/10/2026). Sans `ANTHROPIC_MODEL`, les noms `claude-*` sont réécrits vers `kimi-k2-5` (et `claude-*haiku*` vers `qwen-3-8-27b`).
 
 Variante **testée** via OmniRoute (28/10/2026, `claude -p … --model ven-kimi` → `pong`) : `ANTHROPIC_BASE_URL=http://127.0.0.1:20128`, `ANTHROPIC_API_KEY="$OMNIROUTE_CLE"`.
 

@@ -223,3 +223,12 @@ def test_uninstall_sans_unite_ne_lance_pas_systemctl(vs, tmp_path, monkeypatch):
     monkeypatch.setattr(vs, "systemctl", lambda *a, simule=False: appels.append(a) or 0)
     vs.main(["uninstall"])
     assert ("disable", "--now", "venice-pont") not in appels
+
+
+def test_status_sans_fichier_de_secrets_le_dit(vs, tmp_path, capsys):
+    login(vs, tmp_path)
+    (tmp_path / "cfg" / "defaut" / "venice.env").unlink()
+    assert vs.main(["status"]) == 1
+    sortie = capsys.readouterr().out
+    assert "Fichier de secrets absent" in sortie
+    assert "injoignable" not in sortie

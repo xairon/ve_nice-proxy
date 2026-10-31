@@ -106,7 +106,7 @@ def test_aucun_secret_dans_la_sortie_des_harnais(vs, tmp_path, capsys):
 
 def test_harnais_non_testes_marques(vs):
     assert all(v[0].startswith(("TESTÉ", "NON TESTÉ")) for v in vs.HARNAIS.values())
-    assert vs.HARNAIS["aider"][0].startswith("NON TESTÉ")
+    assert vs.HARNAIS["aider"][0].startswith("TESTÉ")
     # Codex CLI et Claude Code : direct sur le pont depuis le 31/10/2026, OmniRoute reste documenté
     assert "/v1/responses" in vs.HARNAIS["codex"][0] and "/v1/messages" in vs.HARNAIS["claude-code"][0]
 
@@ -232,3 +232,14 @@ def test_status_sans_fichier_de_secrets_le_dit(vs, tmp_path, capsys):
     sortie = capsys.readouterr().out
     assert "Fichier de secrets absent" in sortie
     assert "injoignable" not in sortie
+
+
+def test_harness_aider_prend_deepseek_et_la_vraie_fenetre(vs, tmp_path, capsys):
+    login(vs, tmp_path)
+    assert vs.main(["harness", "aider"]) == 0
+    sortie = capsys.readouterr().out
+    assert "openai/deepseek-v4-1-flash-uncensored" in sortie and "aider.model.metadata.json" in sortie
+    meta = json.loads((RACINE / "gabarits" / "aider" / "aider.model.metadata.json").read_text())
+    assert meta["openai/deepseek-v4-1-flash-uncensored"]["max_input_tokens"] == 500000
+    assert vs.main(["harness", "claude-code"]) == 0
+    assert "ANTHROPIC_MODEL=kimi-k2-5" in capsys.readouterr().out

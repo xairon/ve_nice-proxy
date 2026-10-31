@@ -147,6 +147,8 @@ Variante **testée** via OmniRoute (28/10/2026, `claude -p … --model ven-kimi`
 
 `venice-setup harness claude-code` imprime aussi deux lignes à lancer une fois : l'outil MCP `venice-mcp` (`claude mcp add … deepseek`) et la consigne `gabarits/claude-code/CLAUDE.deepseek.md`. Claude Code explore et relit, et confie chaque écriture de code à DeepSeek V4.1 Flash Uncensored (gratuit, ~500k) par l'outil `deepseek_coder`, qui applique et teste. Détails : [OUTILS.md](OUTILS.md#en-outil-mcp--venice-mcp).
 
+**Testé contre le vrai Venice** (31/10/2026, Claude Code 2.1.312 + `kimi-k2-5`, `.mcp.json` de projet + consigne) : panier sans sa remise, 1 test sur 2 en échec. En 28 s, Kimi a exploré (Read, Bash) puis appelé **une fois** `deepseek_coder` ; DeepSeek a écrit la correction, appliquée et testée par l'outil ; Kimi n'a fait **aucun** Edit ni Write. pytest 2/2, journal du pont : 6 × `/v1/messages` (Kimi) + 1 × `/v1/chat/completions` (DeepSeek), tous 200, 0 crédit.
+
 ### claude-code-router (non testé, plus nécessaire)
 
 Projet tiers (<https://github.com/musistudio/claude-code-router>), configuré dans `~/.claude-code-router/config.json` : un fournisseur dont `api_base_url` est l'URL **complète** `http://127.0.0.1:8700/v1/chat/completions`, `api_key` = clé du pont, `models: ["kimi-k2-5"]`, et un bloc `Router` qui désigne `"default": "venice,kimi-k2-5"` ; lancement par `ccr code`. Non essayé ici : préférez OmniRoute, déjà en place et testé.

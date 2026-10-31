@@ -123,3 +123,19 @@ curl -s http://127.0.0.1:8700/v1/messages -H "x-api-key: $VENICE_PONT_CLE" -H 'C
 Réponse attendue : `"finish_reason": "tool_calls"` (ou `"stop_reason": "tool_use"`) et un appel nommé `read`. Si vous recevez du texte du type « je n'ai pas d'outil », la relance a échoué : renvoyez la requête ou changez de modèle.
 
 Avec un client : `./venice-setup harness opencode --appliquer`, `./venice-setup harness claude-code` ou `./venice-setup harness codex`, puis demandez « crée `notes.txt` avec trois lignes ». Le journal doit montrer un appel d'écriture, et le fichier doit exister.
+
+## DeepSeek sans outils : `venice-delegue`
+
+Sur la route agents, DeepSeek V4.1 Flash appelle les outils **en natif** ; la boucle d'agent de Venice ne connaît pas ceux du client et répond « Tool not found » (31/10/2026). Aucun champ de requête ne coupe ses outils internes. **Sans outil déclaré**, en revanche, DeepSeek code très bien : on lui donne les fichiers, il répond par des modifications écrites, et un programme les applique. C'est ce que font **aider** et `venice-delegue` :
+
+```bash
+export VENICE_PONT_CLE=...            # la clé du pont (fichier de secrets), jamais affichée
+venice-delegue "Corrige le bogue de panier.py" -f boutique/panier.py -f tests/test_panier.py --test "pytest -q"
+venice-delegue "Résume ce module" -f module.py --format texte
+venice-delegue "Liste les fonctions publiques" -f module.py --format json
+```
+
+- Le modèle répond par des blocs `chemin` / `<<<<<<< SEARCH` / `=======` / `>>>>>>> REPLACE` (format d'aider, que les modèles connaissent) ; SEARCH vide = création de fichier.
+- Avec `--test`, la sortie des tests en échec est renvoyée au modèle avec l'état des fichiers, jusqu'à `--tours` (3).
+- Aucune écriture hors de `--racine` ; `--dry-run` affiche la réponse sans rien écrire.
+- Modèle par défaut : `deepseek-v4-1-flash-uncensored` (`-m` ou `VENICE_DELEGUE_MODELE` pour un autre). Un agent (Claude Code avec Kimi) peut l'appeler par son outil Bash pour confier un gros morceau de code à DeepSeek.

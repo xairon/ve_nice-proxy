@@ -107,17 +107,18 @@ def test_aucun_secret_dans_la_sortie_des_harnais(vs, tmp_path, capsys):
 def test_harnais_non_testes_marques(vs):
     assert all(v[0].startswith(("TESTÉ", "NON TESTÉ")) for v in vs.HARNAIS.values())
     assert vs.HARNAIS["aider"][0].startswith("NON TESTÉ")
-    # Codex CLI et Claude Code ne passent que par OmniRoute (/v1/responses, /v1/messages) : l'état doit le dire
-    assert "OmniRoute" in vs.HARNAIS["codex"][0] and "OmniRoute" in vs.HARNAIS["claude-code"][0]
+    # Codex CLI et Claude Code : direct sur le pont depuis le 31/10/2026, OmniRoute reste documenté
+    assert "/v1/responses" in vs.HARNAIS["codex"][0] and "/v1/messages" in vs.HARNAIS["claude-code"][0]
 
 
-def test_codex_et_claude_code_pointent_sur_omniroute(vs, tmp_path, capsys):
+def test_codex_et_claude_code_pointent_sur_le_pont(vs, tmp_path, capsys):
     login(vs, tmp_path)
-    vs.main(["harness", "codex", "--modele", "ven-kimi"])
-    vs.main(["harness", "claude-code", "--modele", "ven-kimi"])
+    vs.main(["harness", "codex"])
+    vs.main(["harness", "claude-code"])
     sortie = capsys.readouterr().out
-    assert 'wire_api = "responses"' in sortie and "http://127.0.0.1:20128/v1" in sortie
-    assert "ANTHROPIC_BASE_URL=http://127.0.0.1:20128" in sortie and "ANTHROPIC_API_KEY" in sortie
+    assert 'wire_api = "responses"' in sortie and 'base_url = "http://127.0.0.1:8700/v1"' in sortie
+    assert "export ANTHROPIC_BASE_URL=http://127.0.0.1:8700\n" in sortie and "ANTHROPIC_MODEL=kimi-k2-5" in sortie
+    assert "20128" in sortie  # variante OmniRoute toujours indiquée
 
 
 # --- login : validation du cookie et effets de bord (trouvés à la campagne de tests du 28/10/2026) ---

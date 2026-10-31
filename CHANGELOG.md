@@ -2,6 +2,17 @@
 
 ## Non publié
 
+### Ajouté (31/10/2026 : module de code agentique)
+- **Claude Code en direct** : le pont expose l'API Messages d'Anthropic (`/v1/messages`, `/v1/messages/count_tokens`, flux SSE au format Anthropic, `tool_use`/`tool_result`, images, documents, clé en `x-api-key`). Essai réel : Claude Code 2.1.316 a écrit un fichier par l'outil `Write` émulé (réponses du modèle simulées). `venice-setup harness claude-code` pointe sur le pont.
+- **Codex CLI en direct** : `/v1/responses` (flux compris, `function_call`, outils `custom` comme `apply_patch`, `local_shell`, `previous_response_id` en mémoire). Vérifié avec le SDK OpenAI ; Codex lui-même pas encore lancé en direct. `venice-setup harness codex` pointe sur le pont.
+- **Outils émulés plus robustes** : formats `<tool_call>…</tool_call>` (Qwen, GLM), objet ou liste nus, bloc ```json au milieu de la prose ; clés `parameters`/`input`, noms préfixés ou en casse différente, JSON réparé (virgule finale, appel tronqué). `tool_choice` (`none`, `required`, outil imposé avec relance) et `parallel_tool_calls`.
+- **Vrai flux avec outils** : la prose est relayée au fil de l'eau, seul l'appel d'outil est retenu jusqu'à être complet (avant : toute la réponse en tampon).
+- **Garde de contexte** du chat classique : au-delà de ~36k jetons estimés, élagage des messages anciens (système, premier message et fin gardés) ou 400 `context_length_exceeded`, au lieu de la troncature silencieuse de Venice qui effaçait la définition des outils.
+- **Alias de modèles** (`VENICE_PONT_ALIAS`) : `claude-*`, `gpt-*`, `codex-*` → `kimi-k2-5`, `claude-*haiku*` → `qwen-3-8-27b`.
+- **API officielle facultative** (`VENICE_API_KEY`) : modèles `api/<id>` servis par `api.venice.ai` (conforme aux CGU, facturé), outils natifs pour les modèles qui l'annoncent, émulation sinon ; mode « API seule » sans cookie. Vérifié contre un serveur factice, pas encore contre la vraie API.
+- L'historique rejoué garde la prose de l'assistant à côté de ses appels d'outil, et le nom de l'outil dans chaque résultat ; le rôle `developer` est traité comme `system`.
+- Erreurs au format du client (Anthropic : `{"type":"error",…}`) ; modèle absent → 400 au lieu de 502.
+
 ### Corrigé
 - Outils émulés (30/10/2026, OpenCode) : une prose avant l'appel JSON est acceptée et devient le contenu ; quand le modèle appelle un outil natif de Venice et se voit répondre « Tool not found », le pont relance une fois avec une consigne corrective qui force le format JSON. Même requête rejouée : 12/12 appels d'outil produits, écriture de fichier vérifiée de bout en bout.
 

@@ -317,8 +317,10 @@ HARNAIS = {
     "aider": ("NON TESTÉ (installation impossible ici : Python 3.13, dépendances sans roue)", None),
     "cline": ("NON TESTÉ", None),
     "continue": ("NON TESTÉ", None),
-    "codex": ("TESTÉ via OmniRoute uniquement (/v1/responses traduit vers Venice, ven-kimi) ; Codex CLI ne peut pas parler au pont seul, qui n'expose pas /v1/responses", None),
-    "claude-code": ("TESTÉ via OmniRoute uniquement (/v1/messages traduit vers Venice, ven-kimi, 'pong') ; claude-code-router : non testé", None),
+    "codex": ("TESTÉ via OmniRoute (ven-kimi) ; direct sur le pont (/v1/responses, 31/10/2026) : vérifié avec le SDK OpenAI "
+              "et les tests, Codex CLI lui-même non lancé en direct", None),
+    "claude-code": ("TESTÉ en direct sur le pont (/v1/messages, Claude Code 2.1.316, écriture de fichier par l'outil Write, "
+                    "réponses du modèle simulées, 31/10/2026) ; TESTÉ via OmniRoute (ven-kimi, 'pong')", None),
 }
 
 
@@ -348,23 +350,29 @@ providers:
     key_env: VENICE_PONT_CLE
     model: {m}""")
     elif n == "codex":
-        print(f"""# ~/.codex/config.toml : Codex CLI exige l'API Responses, que seul OmniRoute (pas le pont) expose.
-# {m} doit être un alias d'OmniRoute ouvert à votre clé (exemple : ven-kimi).
-model_provider = "omniroute"
+        print(f"""# ~/.codex/config.toml : le pont expose l'API Responses (/v1/responses) que Codex CLI exige.
+# Tout nom gpt-*/codex-* est réécrit vers kimi-k2-5 (VENICE_PONT_ALIAS) ; un modèle Venice explicite passe tel quel.
+model_provider = "venice"
 model = "{m}"
-[model_providers.omniroute]
-name = "OmniRoute"
-base_url = "http://127.0.0.1:20128/v1"
-env_key = "OMNIROUTE_CLE"
-wire_api = "responses\"""")
+[model_providers.venice]
+name = "Venice (pont local)"
+base_url = "{u}"
+env_key = "VENICE_PONT_CLE"
+wire_api = "responses"
+# puis : export VENICE_PONT_CLE="$(grep ^VENICE_PONT_CLE= {p['env']} | cut -d= -f2-)"
+# Variante OmniRoute (testée) : base_url = "http://127.0.0.1:20128/v1", env_key = "OMNIROUTE_CLE", model = "ven-kimi".""")
     elif n == "claude-code":
-        print(f"""# Claude Code parle l'API Anthropic ; OmniRoute l'expose (/v1/messages) et la traduit vers Venice.
-# {m} doit être un alias d'OmniRoute ouvert à votre clé. Prendre un alias à grande fenêtre (ven-kimi, 262 144) :
-# sur ven-qwen-nc (~39k utiles) le prompt de Claude Code est tronqué et les réponses sont hors sujet.
-export ANTHROPIC_BASE_URL=http://127.0.0.1:20128
-export ANTHROPIC_API_KEY="$OMNIROUTE_CLE"
-claude --model {m}
-# Alternative sans OmniRoute : claude-code-router (https://github.com/musistudio/claude-code-router), non testé.""")
+        racine = u[:-3] if u.endswith("/v1") else u
+        print(f"""# Claude Code parle l'API Messages d'Anthropic : le pont l'expose (/v1/messages) et la traduit vers Venice.
+# Prendre un modèle à grande fenêtre (kimi-k2-5, 262 144) : le prompt de Claude Code (~25k jetons) dépasse vite les
+# ~36k du chat classique (qwen…), et le pont refuse alors avec « prompt is too long » plutôt que de tronquer en silence.
+export ANTHROPIC_BASE_URL={racine}
+export ANTHROPIC_API_KEY="$(grep ^VENICE_PONT_CLE= {p['env']} | cut -d= -f2-)"
+export ANTHROPIC_MODEL={m}
+export ANTHROPIC_DEFAULT_HAIKU_MODEL=qwen-3-8-27b       # tâches de fond (titres, résumés) : rapide
+export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1       # moins de requêtes annexes : le pont plafonne à 20/min
+claude
+# Variante OmniRoute (testée) : ANTHROPIC_BASE_URL=http://127.0.0.1:20128, ANTHROPIC_API_KEY=$OMNIROUTE_CLE, --model ven-kimi.""")
     else:
         print(f"URL de base : {u}\nClé API : VENICE_PONT_CLE\nModèle : {m}\n# Réglage générique « OpenAI-compatible » de {n}.")
     return 0

@@ -41,7 +41,8 @@ GLM 5.2 et 5.3 Flash, Kimi K2.7 Code, DeepSeek V4.1 Flash (version chat), Aion 3
 | Agent de code (OpenCode…) | `kimi-k2-5` puis `qwen-3-8-27b` en repli | bancs : Kimi 12/12 tests, Qwen 15/15 sur une tâche de code réelle (OpenCode 1.18.21, ~17k jetons par requête) |
 | Très long contexte (> 39k) | `kimi-k2-5` ou `deepseek-v4-1-flash-uncensored` | seuls modèles à grande fenêtre ; au-delà de ~250k Venice **compacte** le contexte |
 | Jeu de rôle | `venice-uncensored-role-play` | |
-| Claude Code | `kimi-k2-5` (via OmniRoute) | le prompt de Claude Code dépasse 39k : sur Qwen il est tronqué et les réponses sont hors sujet |
+| Claude Code, Codex CLI | `kimi-k2-5` (direct sur le pont) | leurs prompts sont gros (outils compris, ~20k jetons et plus) : sur le chat classique la garde de contexte refuse vite. Les noms `claude-*` et `gpt-*` sont réécrits vers `kimi-k2-5` |
+| Outils natifs (pas d'émulation) | `api/<modèle>` avec une clé API | facturé à l'usage ; voir [OUTILS.md](OUTILS.md) |
 
 ## Limites mesurées (28/10/2026, un échantillon par mesure)
 

@@ -1799,7 +1799,7 @@ class SuiviCredits:
     """Garde-fou crédits : alerte si le solde passe sous la référence (un modèle à pièce a débité).
 
     La référence monte avec une recharge (forfait mensuel) et se remet au solde courant sur acquittement. Elle survit
-    à un redémarrage (fichier). `alerte` est lue par /health puis par sonde-tuf.sh (OnFailure=boussole-echec)."""
+    à un redémarrage (fichier). `alerte` est lue par /health (et par toute sonde de supervision)."""
 
     SEUIL = 0.5
 

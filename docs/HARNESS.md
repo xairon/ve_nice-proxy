@@ -10,7 +10,7 @@ Deux familles :
 
 | Client | État (28/10/2026) | Chemin |
 |---|---|---|
-| OpenCode 1.18.21 | **TESTÉ** (banc : tâche de code réelle avec Kimi K2.5 12/12 tests, Qwen 3.8 15/15 ; fusion de config `--appliquer` vérifiée sur une copie). Nouvel essai bout en bout avec ce CLI : voir note ci-dessous | pont direct, ou OmniRoute |
+| OpenCode 1.18.21 | **TESTÉ** (banc : tâche de code réelle avec Kimi K2.5 12/12 tests, Qwen 3.8 15/15 ; fusion de config `--appliquer` vérifiée sur une copie ; 31/10/2026 : Kimi K2.5 6/6 avec outils, GLM 4.7 Heretic, Venice Uncensored 1.2 et Gemma 4 Uncensored OK sur de petites tâches) | pont direct, ou OmniRoute |
 | curl / SDK OpenAI | **TESTÉ** (chat, outil émulé, flux SSE, refus 403) | pont direct |
 | OmniRoute 3.8.52 | **TESTÉ** (fournisseur `openai-compatible` + alias) | pont → OmniRoute |
 | Hermes Agent v0.22.2 | **TESTÉ via OmniRoute** ; branchement direct : format conforme au schéma de config, non lancé | OmniRoute |
@@ -18,10 +18,10 @@ Deux familles :
 | Codex CLI 0.162.1 | **TESTÉ via OmniRoute** (`codex exec`, `pong` sur `ven-kimi`) ; **direct** (`/v1/responses`, 31/10/2026) : vérifié avec le SDK OpenAI, Codex lui-même **non lancé** | pont direct, ou OmniRoute |
 | Claude Code 2.1.312 | **TESTÉ en direct contre Venice** (31/10/2026, `/v1/messages`, `kimi-k2-5` : Glob, Read, Edit, Bash, bogue corrigé, pytest vert, 0 crédit) ; **TESTÉ via OmniRoute** (2.1.312, `pong` sur `ven-kimi`) | pont direct, ou OmniRoute |
 | claude-code-router | **NON TESTÉ** (plus nécessaire : le pont parle `/v1/messages`) | pont direct |
-| aider | **NON TESTÉ** : installation impossible sur la machine d'essai (Python 3.13, dépendances sans roue précompilée) | pont direct |
+| aider 0.86.2 | **TESTÉ** (31/10/2026, DeepSeek et Kimi, 263/263 tests, voir [aider](#aider-testé-recommandé-pour-deepseek-et-les-gros-dépôts)) | pont direct |
 | Cline, Continue | **NON TESTÉ** (extensions d'éditeur, non installées) | pont direct |
 
-> Note OpenCode : le contrôle de sécurité de la machine d'essai a bloqué le lancement d'un nouvel agent `opencode run` pendant cette campagne ; l'essai bout en bout précédent (même modèle, même pont) reste la référence. Si vous l'installez, lancez `opencode run -m venice-direct/qwen-3-8-27b "Crée un fichier bonjour.txt contenant salut"` dans un dossier jetable pour le rejouer.
+> Pour vérifier votre installation OpenCode : `opencode run -m venice-direct/kimi-k2-5 "Crée un fichier bonjour.txt contenant salut"` dans un dossier jetable.
 
 ## OpenCode
 

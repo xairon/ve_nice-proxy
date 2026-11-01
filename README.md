@@ -21,6 +21,20 @@ Le pont écoute ensuite sur `127.0.0.1:8700` et parle **trois formats** : chat c
 ./venice-setup harness codex         # Codex CLI directement sur le pont
 ```
 
+## Ce qui marche, ce qui ne marche pas
+
+Essais réels du 31/10/2026, compte Pro, **0 crédit débité** :
+
+| Modèle (gratuit avec Pro) | Avec outils (Claude Code, OpenCode) | Sans outils (aider, `venice-delegue`) | Contexte utile |
+|---|---|---|---|
+| **Kimi K2.5** (`kimi-k2-5`) | ✅ outils émulés fiables : lire, modifier, lancer les tests | ✅ | ~250k |
+| **DeepSeek V4.1 Flash Uncensored** | ❌ Venice intercepte ses appels d'outils (« Tool not found »), sans réglage pour l'en empêcher | ✅ aider : dépôt de 109k jetons en un tour, 263/263 tests | ~500k |
+| GLM 4.7 Heretic, Venice Uncensored 1.2, Gemma 4 Uncensored | ✅ pour de petites tâches | ✅ | **~39k** (limite du chat classique) |
+| Qwen 3.8 27B | ⚠️ aider seulement | ✅ | ~39k |
+| Aion 3.0 | ❌ à éviter pour le code (échecs aux essais) | ❌ | ~39k |
+
+En pratique : **Kimi pilote l'agent** (il sait se servir des outils), **DeepSeek écrit le code** quand il faut une grande fenêtre ou un modèle non censuré, soit par aider, soit par délégation (voir [Coder avec Venice](#coder-avec-venice)). Ne mettez jamais DeepSeek comme modèle principal d'un agent à outils.
+
 ## À quoi ça sert
 
 L'API publique de Venice est facturée à l'usage. L'abonnement Pro donne, **sur le site**, des modèles illimités (ceux qui n'affichent pas de pièce dans le sélecteur). Le pont permet à vos outils de développement d'utiliser ces modèles comme s'ils parlaient à une API OpenAI. Il :
@@ -107,6 +121,54 @@ python3 venice-setup harness opencode --appliquer   # ajoute le fournisseur dans
 
 Windows : les tests du pont passent sur le runner Windows de la CI (28/10/2026), mais l'auteur n'a pas de machine Windows : `python venice-setup run` au premier plan est le chemin à tenter, un retour est le bienvenu.
 
+## Coder avec Venice
+
+Trois façons, testées. Toutes supposent le pont démarré (`./venice-setup quickstart`) et sa clé dans `VENICE_PONT_CLE` (voir [docs/HARNESS.md](docs/HARNESS.md)).
+
+### 1. aider + DeepSeek : gros dépôts, grand contexte, sans censure
+
+aider n'envoie aucun outil : DeepSeek répond par des blocs de modification qu'aider applique. C'est le chemin le plus simple pour profiter de ses ~500k de contexte.
+
+```bash
+./venice-setup harness aider      # imprime la recette complète
+cp gabarits/aider/aider.model.metadata.json ~/.aider.model.metadata.json
+export OPENAI_API_BASE=http://127.0.0.1:8700/v1 OPENAI_API_KEY="$VENICE_PONT_CLE"
+aider --model openai/deepseek-v4-1-flash-uncensored --edit-format diff --no-show-model-warnings
+```
+
+### 2. Claude Code + Kimi, et `/venice` pour confier l'écriture à DeepSeek
+
+```bash
+./venice-setup harness claude-code   # variables ANTHROPIC_* et ligne `claude mcp add … deepseek`
+```
+
+Claude Code tourne sur Kimi par le pont (`/v1/messages`). En plus, l'outil MCP `venice-mcp` permet de confier l'écriture du code à DeepSeek : l'agent explore et relit, DeepSeek écrit, l'outil applique et lance les tests.
+
+- **Sur demande** : ajoutez `gabarits/claude-code/CLAUDE.venice-mode.md` à `~/.claude/CLAUDE.md` et copiez `gabarits/claude-code/commands/venice.md` dans `~/.claude/commands/`. Claude Code travaille normalement jusqu'à « utilise venice » ou `/venice`, puis délègue l'écriture à DeepSeek ; « arrête venice » revient au mode normal. Marche aussi avec un vrai Claude comme chef.
+- **En permanence** pour un projet : `gabarits/claude-code/CLAUDE.deepseek.md`.
+
+### 3. OpenCode + Kimi, DeepSeek en outil MCP
+
+```bash
+./venice-setup harness opencode --appliquer   # ajoute le fournisseur Venice à opencode.json (sauvegarde .bak-*)
+opencode run -m venice-direct/kimi-k2-5 "..."
+```
+
+Pour la délégation à DeepSeek, déclarez `venice-mcp` dans la section `mcp` d'`opencode.json` et mettez la consigne de `CLAUDE.deepseek.md` dans `AGENTS.md` ([docs/OUTILS.md](docs/OUTILS.md#en-outil-mcp--venice-mcp)).
+
+Sans agent du tout : `./venice-delegue "consigne" -f fichier.py --test "pytest -q"` envoie les fichiers à DeepSeek, applique ses modifications et relance tant que les tests échouent.
+
+## Limites connues
+
+- **Risque de compte** : le pont utilise le cookie web, ce que les CGU de Venice interdisent (voir l'avertissement plus haut). Cadence plafonnée par défaut.
+- **DeepSeek ne peut pas se servir d'outils** sur Venice : uniquement par aider, `venice-delegue` ou `venice-mcp`.
+- **~39k de contexte** sur les modèles du chat classique (GLM, Venice Uncensored, Gemma, Qwen) : le pont élague ou refuse au lieu de laisser Venice tronquer en silence. Pour les longues sessions, Kimi ou DeepSeek.
+- **Cookie** à renouveler quand il expire ou si vous vous déconnectez ([docs/COOKIE.md](docs/COOKIE.md)) ; `./venice-setup status` prévient.
+- **Un compte = un pont = un utilisateur** : pas conçu pour être partagé.
+- Testé sous **Linux** (systemd ou Docker). macOS et Windows : `venice-setup run` au premier plan, non testé de bout en bout.
+- Codex CLI : format vérifié, Codex lui-même non lancé en direct. Cline et Continue : non testés.
+- Détail complet : [docs/LIMITES.md](docs/LIMITES.md).
+
 ## Documentation
 
 | Document | Contenu |
@@ -138,7 +200,7 @@ Windows : les tests du pont passent sur le runner Windows de la CI (28/10/2026),
 | `harness NOM [--modele M] [--appliquer]` | configuration pour un client (`opencode`, `openai`, `omniroute`, `hermes`, `openwebui`, `aider`, `cline`, `continue`, `codex`, `claude-code`) |
 | `profils` | liste les profils (un profil = un compte = un pont) |
 
-Tests : `python -m pytest tests pont/tests` (274 tests, aucun appel réseau).
+Tests : `python -m pytest tests pont/tests` (289 tests, aucun appel réseau).
 
 ## Ce qui n'est pas pris en charge
 
